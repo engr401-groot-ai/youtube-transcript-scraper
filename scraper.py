@@ -12,24 +12,57 @@ import os
 import sys
 import logging
 import time
+from dotenv import load_dotenv
 from datetime import datetime
 from typing import List, Dict, Set
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
-from google.cloud import bigquery
+from google.cloud import bigquery, secretmanager
 from google.oauth2 import service_account
-from dotenv import load_dotenv
 
-load_dotenv()
-
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Load environment variables
+def load_environment_variables():
+    """Load environment variables from Google Cloud Secret Manager or .env file"""
+    # Try to load from Google Cloud Secret Manager first (for Cloud Run)
+    try:
+        client = secretmanager.SecretManagerServiceClient()
+        project_id = os.getenv('GCP_PROJECT_ID', 'its-gro')
+        secret_name = f"projects/{project_id}/secrets/youtube-scraper-env/versions/latest"
+        
+        response = client.access_secret_version(request={"name": secret_name})
+        secret_payload = response.payload.data.decode('UTF-8')
+        
+        # Parse the secret payload (expected format: KEY=VALUE, one per line)
+        for line in secret_payload.strip().split('\n'):
+            if line and '=' in line and not line.startswith('#'):
+                key, value = line.split('=', 1)
+                os.environ[key.strip()] = value.strip()
+        
+        logger.info("✓ Loaded environment variables from Google Cloud Secret Manager")
+        return True
+    except Exception as e:
+        logger.info(f"Could not load from Secret Manager ({e}), trying .env file...")
+        
+        # Fallback to .env file for local development
+        try:
+            load_dotenv()
+            logger.info("✓ Loaded environment variables from .env file")
+            return True
+        except ImportError:
+            logger.warning("python-dotenv not installed, using system environment variables only")
+            return False
+
+# Load environment variables at startup
+load_environment_variables()
+
 
 # Configuration
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY', '')

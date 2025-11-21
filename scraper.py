@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
+# Load environment variables 
 def load_environment_variables():
     """Load environment variables from Google Cloud Secret Manager or .env file"""
     # Try to load from Google Cloud Secret Manager first (for Cloud Run)

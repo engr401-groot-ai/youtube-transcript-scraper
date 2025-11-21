@@ -1,0 +1,23 @@
+steps:
+  # 1. Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: 
+      - 'build'
+      - '-t'
+      - 'us-west1-docker.pkg.dev/$PROJECT_ID/scraper-repo/legis-scraper:latest'
+      - '-t'
+      - 'us-west1-docker.pkg.dev/$PROJECT_ID/scraper-repo/legis-scraper:$BUILD_ID'
+      - '.'
+  
+  # 2. Push the images to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '--all-tags', 'us-west1-docker.pkg.dev/$PROJECT_ID/scraper-repo/legis-scraper']
+
+# Use Cloud Logging only (avoids logs bucket errors)
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+# Tag images for versioning
+images:
+  - 'us-west1-docker.pkg.dev/$PROJECT_ID/scraper-repo/legis-scraper:latest'
+  - 'us-west1-docker.pkg.dev/$PROJECT_ID/scraper-repo/legis-scraper:$BUILD_ID'

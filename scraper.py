@@ -185,7 +185,7 @@ class YouTubeTranscriptScraper:
                 eventType='completed',
                 type='video',
                 order='date',
-                maxResults=min(MAX_VIDEOS_PER_CHANNEL, 50)  # API limit is 50 per request
+                maxResults=min(MAX_VIDEOS_PER_CHANNEL, 50)
             )
             
             response = request.execute()
@@ -222,23 +222,69 @@ class YouTubeTranscriptScraper:
             return []
     
     def get_transcript(self, video_id: str) -> List[Dict]:
-        """Extract transcript from a YouTube video"""
+        """Extract transcript from a YouTube video.
+
+        This uses a small number of strategies in order:
+        1. YouTubeTranscriptApi.get_transcript(...) with common language 'en'
+        2. YouTubeTranscriptApi.list_transcripts(...) and try to fetch
+           - manually created english transcripts
+           - generated (auto) english transcripts
+
+        Returns a list of segments (each a dict with 'text','start','duration') or
+        an empty list if no transcript could be found.
+        """
+        # Primary, simple approach
         try:
             transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-
-            logger.info(f"Successfully fetched transcript for video {video_id} ({len(transcript_list)} segments)")
+            logger.info(f"Successfully fetched transcript for video {video_id} ({len(transcript_list)} segments) via get_transcript")
             return transcript_list
-        except TranscriptsDisabled:
-            logger.warning(f"Transcripts disabled for video {video_id}")
+        except (TranscriptsDisabled, NoTranscriptFound) as e:
+            logger.warning(f"Transcript not available for video {video_id}: {e}")
             return []
-        except NoTranscriptFound:
-            logger.warning(f"No transcript found for video {video_id}")
-            return []
-        except Exception as e:
-            logger.error(f"Error fetching transcript for video {video_id}: {e}")
-            # Include stack trace for unexpected errors to aid debugging
-            logger.exception(e)
-            return []
+        except Exception as primary_exc:
+            # Fallback: try listing transcripts and fetching generated/manual ones
+            logger.info(f"Primary get_transcript failed for {video_id}, attempting list_transcripts fallback: {primary_exc}")
+
+            try:
+                transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
+
+                # Prefer manually created English transcripts, then generated ones.
+                candidates = []
+                try:
+                    candidates.append(transcripts.find_manually_created_transcript(['en', 'en-US']))
+                except Exception:
+                    pass
+
+                try:
+                    candidates.append(transcripts.find_generated_transcript(['en', 'en-US']))
+                except Exception:
+                    pass
+
+                # Generic find_transcript fallback
+                try:
+                    candidates.append(transcripts.find_transcript(['en', 'en-US']))
+                except Exception:
+                    pass
+
+                for cand in candidates:
+                    if cand is None:
+                        continue
+                    try:
+                        fetched = cand.fetch()
+                        logger.info(f"Fetched transcript for {video_id} using fallback ({type(cand).__name__}) with {len(fetched)} segments")
+                        return fetched
+                    except Exception as e:
+                        logger.debug(f"Fallback candidate failed for {video_id}: {e}")
+
+                logger.warning(f"No transcript found for video {video_id} after fallback attempts")
+                return []
+            except (TranscriptsDisabled, NoTranscriptFound) as fallback_known:
+                logger.warning(f"Transcript not available for video {video_id}: {fallback_known}")
+                return []
+            except Exception as fallback_exc:
+                logger.error(f"Unexpected error when listing/fetching transcripts for video {video_id}: {fallback_exc}")
+                logger.debug(''.join([]))
+                return []
     
     def upload_to_bigquery(self, video_id: str, transcript: List[Dict]) -> bool:
         """Upload transcript segments to BigQuery"""

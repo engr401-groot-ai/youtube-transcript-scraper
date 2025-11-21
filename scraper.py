@@ -13,7 +13,6 @@ import sys
 import logging
 import time
 from dotenv import load_dotenv
-from datetime import datetime
 from typing import List, Dict, Set
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -71,7 +70,7 @@ BQ_DATASET = os.getenv('BQ_DATASET', '')
 BQ_TABLE = os.getenv('BQ_TABLE', '')
 SERVICE_ACCOUNT_EMAIL = os.getenv('SERVICE_ACCOUNT_EMAIL', '')
 SERVICE_ACCOUNT_KEY_PATH = os.getenv('SERVICE_ACCOUNT_KEY_PATH', None)  # Optional for local testing
-MAX_VIDEOS_PER_CHANNEL = 10
+MAX_VIDEOS_PER_CHANNEL = 50
 
 # YouTube channels to scrape
 CHANNELS = [
@@ -225,13 +224,8 @@ class YouTubeTranscriptScraper:
     def get_transcript(self, video_id: str) -> List[Dict]:
         """Extract transcript from a YouTube video"""
         try:
-            # Create API instance and fetch transcript
-            ytt_api = YouTubeTranscriptApi()
-            fetched_transcript = ytt_api.fetch(video_id, languages=['en'])
-            
-            # Convert FetchedTranscript to raw data (list of dicts)
-            transcript_list = fetched_transcript.to_raw_data()
-            
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+
             logger.info(f"Successfully fetched transcript for video {video_id} ({len(transcript_list)} segments)")
             return transcript_list
         except TranscriptsDisabled:
@@ -242,6 +236,8 @@ class YouTubeTranscriptScraper:
             return []
         except Exception as e:
             logger.error(f"Error fetching transcript for video {video_id}: {e}")
+            # Include stack trace for unexpected errors to aid debugging
+            logger.exception(e)
             return []
     
     def upload_to_bigquery(self, video_id: str, transcript: List[Dict]) -> bool:

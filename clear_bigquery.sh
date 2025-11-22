@@ -1,39 +1,55 @@
 #!/bin/bash
+set -euo pipefail
 
-# Clear BigQuery table script 
-# ./clear_bigquery.sh
+# Clear BigQuery table(s)
+# Usage:
+#   ./clear_bigquery.sh
+#   ./clear_bigquery.sh transcripts_json
+#   ./clear_bigquery.sh transcripts_json uh_mentions
 
-PROJECT_ID="its-gro"
-DATASET="uh_legis"
-TABLE="transcripts"
+PROJECT_ID="${PROJECT_ID:-its-gro}"
+DATASET="${DATASET:-uh_legis}"
+
+# Default tables for THIS project
+if [ "$#" -eq 0 ]; then
+  TABLES=("transcripts_json")
+else
+  TABLES=("$@")
+fi
 
 echo "========================================="
-echo "Clear BigQuery Table"
+echo "Clear BigQuery Table(s)"
 echo "========================================="
 echo ""
 echo "This will DELETE ALL DATA from:"
 echo "  Project: ${PROJECT_ID}"
 echo "  Dataset: ${DATASET}"
-echo "  Table: ${TABLE}"
+for t in "${TABLES[@]}"; do
+  echo "  Table:   ${t}"
+done
 echo ""
 echo "Are you sure? This cannot be undone!"
 echo ""
-read -p "Type 'yes' to continue: " confirm
 
-if [ "$confirm" != "yes" ]; then
-    echo "Aborted."
-    exit 0
+read -p "Type 'yes' to continue: " confirm
+if [ "${confirm}" != "yes" ]; then
+  echo "Aborted."
+  exit 0
 fi
 
 echo ""
-echo "Deleting all rows from ${PROJECT_ID}.${DATASET}.${TABLE}..."
-
-bq query --use_legacy_sql=false \
-  --project_id=${PROJECT_ID} \
-  "DELETE FROM \`${PROJECT_ID}.${DATASET}.${TABLE}\` WHERE TRUE"
+for t in "${TABLES[@]}"; do
+  echo "Truncating ${PROJECT_ID}.${DATASET}.${t} ..."
+  bq query --use_legacy_sql=false \
+    --project_id="${PROJECT_ID}" \
+    "TRUNCATE TABLE \`${PROJECT_ID}.${DATASET}.${t}\`"
+done
 
 echo ""
-echo "Done! Table cleared."
+echo "Done! Table(s) cleared."
 echo ""
 echo "To verify, run:"
-echo "  bq query --use_legacy_sql=false 'SELECT COUNT(*) FROM \`${PROJECT_ID}.${DATASET}.${TABLE}\`'"
+for t in "${TABLES[@]}"; do
+  echo "  bq query --use_legacy_sql=false --project_id=${PROJECT_ID} 'SELECT COUNT(*) AS n FROM \`${PROJECT_ID}.${DATASET}.${t}\`'"
+done
+echo ""

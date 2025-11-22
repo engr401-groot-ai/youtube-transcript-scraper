@@ -1,23 +1,24 @@
 steps:
   # 1. Build the Docker image
-  - name: 'gcr.io/cloud-builders/docker'
-    args: 
-      - 'build'
-      - '-t'
-      - 'us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/youtube-scraper:latest'
-      - '-t'
-      - 'us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/youtube-scraper:$BUILD_ID'
-      - '.'
-  
-  # 2. Push the images to Artifact Registry
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', '--all-tags', 'us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/youtube-scraper']
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "-t"
+      - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/uh-collector:latest"
+      - "-t"
+      - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/uh-collector:$BUILD_ID"
+      - "."
 
-# Use Cloud Logging only (avoids logs bucket errors)
+  # 2. Push the images to Artifact Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "--all-tags"
+      - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/uh-collector"
+
 options:
   logging: CLOUD_LOGGING_ONLY
 
-# Tag images for versioning
 images:
-  - 'us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/youtube-scraper:latest'
-  - 'us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/youtube-scraper:$BUILD_ID'
+  - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/uh-collector:latest"
+  - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/uh-collector:$BUILD_ID"

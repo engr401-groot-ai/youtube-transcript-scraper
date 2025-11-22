@@ -10,11 +10,12 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY scraper.py .
+# Copy the entire application codebase
+COPY . .
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 
-# Run the scraper
-CMD ["python", "scraper.py"]
+# Run FastAPI on Cloud Run port
+# This assumes your FastAPI instance is named `app` inside scraper.py
+CMD ["uvicorn", "scraper:app", "--host", "0.0.0.0", "--port", "8080"]

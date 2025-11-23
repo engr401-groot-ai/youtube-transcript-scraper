@@ -1,8 +1,14 @@
-fastapi==0.115.4
+fastapi==0.115.5
 uvicorn[standard]==0.32.0
 
-google-api-python-client==2.149.0
-youtube-transcript-api==0.6.2
-google-cloud-bigquery==3.25.0
-google-cloud-secret-manager==2.21.1
 python-dotenv==1.0.1
+
+apify-client==1.7.1
+
+google-api-python-client==2.149.0
+google-cloud-bigquery==3.25.0
+google-cloud-storage==3.0.0
+google-cloud-secret-manager==2.21.1
+
+requests==2.32.3
+youtube-transcript-api==0.6.2

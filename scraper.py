@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-YouTube Transcript Scraper for Hawaii Legislative Channels
+Apify-based YouTube Transcript Scraper for Hawaii Legislative Channels
 
 Modes:
 1) Cloud Run service (default): exposes HTTP endpoints:
@@ -9,8 +8,8 @@ Modes:
 2) CLI/local: `python scraper.py` runs a scrape once and exits.
 
 Scrapes completed live stream videos from Hawaii Senate and House YouTube channels,
-extracts transcripts (English if available), and uploads them to Google BigQuery
-with deduplication.
+extracts transcripts via Apify actor starvibe/youtube-video-transcript (English if available),
+and uploads them to Google BigQuery with deduplication.
 
 BigQuery schema expected (segment-level table):
   video_id STRING
@@ -26,16 +25,16 @@ import sys
 import logging
 import time
 import threading
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Set, Optional, Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 from google.cloud import bigquery, secretmanager
 from google.oauth2 import service_account
+from apify_client import ApifyClient
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +42,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("scraper")
 
-app = FastAPI(title="UH YouTube Transcript Scraper", version="0.2.0")
+app = FastAPI(title="UH YouTube Transcript Scraper (Apify)", version="0.3.0")
 
 
 # -------------------------------
@@ -83,15 +82,14 @@ BQ_TABLE = os.getenv("BQ_TABLE", "")
 SERVICE_ACCOUNT_KEY_PATH = os.getenv("SERVICE_ACCOUNT_KEY_PATH")  # optional local
 MAX_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_VIDEOS_PER_CHANNEL", "50"))
 
+# Apify config
+APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
+APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "starvibe/youtube-video-transcript")
+APIFY_LANGUAGE = os.getenv("APIFY_LANGUAGE", "en")
+
 CHANNELS = [
-    {
-        "name": "Hawaii Senate",
-        "channel_id": "UCekvvdL_uyq2DUyj1GjlrOA",
-    },
-    {
-        "name": "Hawaii House of Representatives",
-        "channel_id": "UCvoLAX1ww3e63K8qQ5of0bw",
-    },
+    {"name": "Hawaii Senate", "channel_id": "UCekvvdL_uyq2DUyj1GjlrOA"},
+    {"name": "Hawaii House of Representatives", "channel_id": "UCvoLAX1ww3e63K8qQ5of0bw"},
 ]
 
 
@@ -101,6 +99,7 @@ def validate_configuration() -> None:
         "GCP_PROJECT_ID": GCP_PROJECT_ID,
         "BQ_DATASET": BQ_DATASET,
         "BQ_TABLE": BQ_TABLE,
+        "APIFY_TOKEN": APIFY_TOKEN,
     }
     missing = [k for k, v in required.items() if not v]
     if missing:
@@ -118,6 +117,7 @@ class YouTubeTranscriptScraper:
         self.youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
         self.bq_client = self._init_bigquery_client()
         self.table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
+        self.apify = ApifyClient(APIFY_TOKEN)
 
     def _init_bigquery_client(self) -> bigquery.Client:
         if SERVICE_ACCOUNT_KEY_PATH and os.path.exists(SERVICE_ACCOUNT_KEY_PATH):
@@ -183,52 +183,71 @@ class YouTubeTranscriptScraper:
         logger.info(f"Found {len(video_ids)} videos for {channel_name}")
         return video_ids
 
-    def get_transcript(self, video_id: str) -> List[Dict]:
-        try:
-            return YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
-        except (TranscriptsDisabled, NoTranscriptFound):
-            return []
-        except Exception as primary:
-            logger.info(f"Direct transcript failed for {video_id}: {primary}; trying fallback")
+    # -------- Apify transcript path --------
+    def get_transcript_apify(self, video_id: str) -> List[Dict[str, Any]]:
+        """
+        Calls Apify actor for a single video and returns a list of segments:
+        [{start: float, end: float, text: str}, ...]
+        """
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        run_input = {
+            "youtube_url": youtube_url,
+            "language": APIFY_LANGUAGE,
+        }
+
+        # Retry a few times because Apify / YT can be flaky
+        last_err = None
+        for attempt in range(1, 4):
             try:
-                transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
-                candidates = []
+                logger.info(f"Apify transcript fetch ({attempt}/3) for {video_id}")
+                run = self.apify.actor(APIFY_ACTOR_ID).call(run_input=run_input)
+                dataset_id = run.get("defaultDatasetId")
+                if not dataset_id:
+                    logger.warning(f"No dataset returned by Apify for {video_id}")
+                    return []
 
-                for finder in (
-                    lambda: transcripts.find_manually_created_transcript(["en", "en-US"]),
-                    lambda: transcripts.find_generated_transcript(["en", "en-US"]),
-                    lambda: transcripts.find_transcript(["en", "en-US"]),
-                ):
-                    try:
-                        candidates.append(finder())
-                    except Exception:
-                        pass
+                items = list(self.apify.dataset(dataset_id).iterate_items())
+                if not items:
+                    logger.warning(f"Empty Apify dataset for {video_id}")
+                    return []
 
-                for cand in candidates:
-                    try:
-                        return cand.fetch()
-                    except Exception:
+                # Actor returns one item per video
+                item = items[0]
+                transcript = item.get("transcript") or []
+
+                segments = []
+                for seg in transcript:
+                    text = (seg.get("text") or "").strip()
+                    if not text:
                         continue
+                    start = float(seg.get("start", 0.0))
+                    end = float(seg.get("end", start))
+                    segments.append({"start": start, "end": end, "text": text})
 
-            except Exception as fallback:
-                logger.warning(f"Fallback list_transcripts failed for {video_id}: {fallback}")
+                return segments
 
-            return []
+            except Exception as e:
+                last_err = e
+                logger.warning(f"Apify attempt {attempt} failed for {video_id}: {e}")
+                time.sleep(2.0 * attempt)
 
-    def upload_to_bigquery(self, video_id: str, transcript: List[Dict]) -> bool:
-        if not transcript:
+        logger.error(f"Apify transcript failed for {video_id}: {last_err}")
+        return []
+
+    def upload_to_bigquery(self, video_id: str, segments: List[Dict[str, Any]]) -> bool:
+        if not segments:
             return False
 
         rows = []
-        for idx, seg in enumerate(transcript):
+        for idx, seg in enumerate(segments):
             start = float(seg.get("start", 0))
-            dur = float(seg.get("duration", 0))
+            end = float(seg.get("end", start))
             rows.append(
                 {
                     "video_id": video_id,
                     "segment_index": idx,
                     "start_sec": int(start),
-                    "end_sec": int(start + dur),
+                    "end_sec": int(end),
                     "text": seg.get("text", ""),
                 }
             )
@@ -247,11 +266,11 @@ class YouTubeTranscriptScraper:
             return False
 
     def process_video(self, video_id: str) -> bool:
-        transcript = self.get_transcript(video_id)
-        if not transcript:
+        segments = self.get_transcript_apify(video_id)
+        if not segments:
             logger.info(f"No transcript for {video_id}; skipping")
             return False
-        return self.upload_to_bigquery(video_id, transcript)
+        return self.upload_to_bigquery(video_id, segments)
 
     def run_once(self) -> Dict[str, int]:
         existing = self.get_existing_video_ids()

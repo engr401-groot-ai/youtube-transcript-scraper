@@ -4,18 +4,21 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
-# Copy requirements first for better caching
+# Env hygiene
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Copy requirements first for caching
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install deps
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the entire application codebase
-COPY . .
+# Copy app code
+COPY scraper.py .
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
+# Cloud Run listens on 8080
+EXPOSE 8080
 
-# Run FastAPI on Cloud Run port
-# This assumes your FastAPI instance is named `app` inside scraper.py
+# Start FastAPI server
 CMD ["uvicorn", "scraper:app", "--host", "0.0.0.0", "--port", "8080"]

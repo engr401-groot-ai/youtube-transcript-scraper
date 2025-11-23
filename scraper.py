@@ -1,185 +1,151 @@
 #!/usr/bin/env python3
-# python3 scraper.py
-
 """
-YouTube Transcript Scraper for Hawaii Legislative Channels (MVP)
+YouTube Transcript Scraper for Hawaii Legislative Channels
 
-MVP scope:
-1) Auto-fetch new YouTube hearings (completed livestreams)
-2) Auto-fetch transcripts (captions first via Apify actor)
-3) Store transcripts in BigQuery as JSON
-4) Deduplicate by video_id
+Modes:
+1) Cloud Run service (default): exposes HTTP endpoints:
+   - GET /health
+   - POST /run  (kicks off a scrape + BQ upload)
+2) CLI/local: `python scraper.py` runs a scrape once and exits.
 
-NOTE:
-- Keyword scan + output table happens in uh-mentions-collector later.
-- Whisper fallback is intentionally NOT included in this scraper yet.
+Scrapes completed live stream videos from Hawaii Senate and House YouTube channels,
+extracts transcripts (English if available), and uploads them to Google BigQuery
+with deduplication.
+
+BigQuery schema expected (segment-level table):
+  video_id STRING
+  segment_index INTEGER
+  start_sec INTEGER
+  end_sec INTEGER
+  text STRING
+  created_at TIMESTAMP (default CURRENT_TIMESTAMP())
 """
 
 import os
 import sys
-import json
-import time
 import logging
+import time
+import threading
 from typing import List, Dict, Set, Optional
 
 from dotenv import load_dotenv
+from fastapi import FastAPI, BackgroundTasks
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
-
 from google.cloud import bigquery, secretmanager
 from google.oauth2 import service_account
 
-from apify_client import ApifyClient
-from apify_client._errors import ApifyApiError
-
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("scraper")
 
-# ------------------------------------------------------------------------------
-# Env loading
-# ------------------------------------------------------------------------------
+app = FastAPI(title="UH YouTube Transcript Scraper", version="0.2.0")
 
-def load_environment_variables():
+
+# -------------------------------
+# Env loading / config
+# -------------------------------
+def load_environment_variables() -> None:
     """Load environment variables from Secret Manager (Cloud Run) or .env (local)."""
+    project_id = os.getenv("GCP_PROJECT_ID", "its-gro")
+    secret_name = f"projects/{project_id}/secrets/youtube-scraper-env/versions/latest"
+
     try:
         client = secretmanager.SecretManagerServiceClient()
-        project_id = os.getenv("GCP_PROJECT_ID", "its-gro")
-        secret_name = f"projects/{project_id}/secrets/youtube-scraper-env/versions/latest"
-
         response = client.access_secret_version(request={"name": secret_name})
-        secret_payload = response.payload.data.decode("UTF-8")
+        payload = response.payload.data.decode("utf-8")
 
-        for line in secret_payload.strip().split("\n"):
-            if line and "=" in line and not line.startswith("#"):
-                key, value = line.split("=", 1)
-                os.environ[key.strip()] = value.strip()
+        for line in payload.strip().splitlines():
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ[k.strip()] = v.strip()
 
         logger.info("✓ Loaded environment variables from Secret Manager")
-        return True
+        return
 
     except Exception as e:
-        logger.info(f"Could not load from Secret Manager ({e}), trying .env...")
+        logger.info(f"Secret Manager load failed ({e}); falling back to .env")
         load_dotenv()
-        logger.info("✓ Loaded environment variables from .env")
-        return True
+        logger.info("✓ Loaded environment variables from .env (if present)")
+
 
 load_environment_variables()
 
-# ------------------------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------------------------
-
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
-BQ_DATASET = os.getenv("BQ_DATASET", "uh_legis")
-BQ_TABLE = os.getenv("BQ_TABLE", "transcripts_json")
-
-SERVICE_ACCOUNT_EMAIL = os.getenv("SERVICE_ACCOUNT_EMAIL", "")
-SERVICE_ACCOUNT_KEY_PATH = os.getenv("SERVICE_ACCOUNT_KEY_PATH", None)
-
+BQ_DATASET = os.getenv("BQ_DATASET", "")
+BQ_TABLE = os.getenv("BQ_TABLE", "")
+SERVICE_ACCOUNT_KEY_PATH = os.getenv("SERVICE_ACCOUNT_KEY_PATH")  # optional local
 MAX_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_VIDEOS_PER_CHANNEL", "50"))
-
-# Apify
-APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "")
-APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "youtube-video-transcript")  
-# ^ put your exact actor ID/name here, e.g. "streamers/youtube-video-transcript"
-APIFY_LANGUAGE = os.getenv("APIFY_LANGUAGE", "en")
-
-# BigQuery insert behavior
-BQ_JSON_COLUMN = os.getenv("BQ_JSON_COLUMN", "transcript_json")  
-# Column that holds the full Apify payload (STRING or JSON)
-BQ_JSON_AS_STRING = os.getenv("BQ_JSON_AS_STRING", "true").lower() == "true"
 
 CHANNELS = [
     {
         "name": "Hawaii Senate",
-        "channel_id": "UCekvvdL_uyq2DUyj1GjlrOA"
+        "channel_id": "UCekvvdL_uyq2DUyj1GjlrOA",
     },
     {
         "name": "Hawaii House of Representatives",
-        "channel_id": "UCvoLAX1ww3e63K8qQ5of0bw"
-    }
+        "channel_id": "UCvoLAX1ww3e63K8qQ5of0bw",
+    },
 ]
 
-# ------------------------------------------------------------------------------
-# Validation
-# ------------------------------------------------------------------------------
 
-def validate_configuration():
+def validate_configuration() -> None:
     required = {
         "YOUTUBE_API_KEY": YOUTUBE_API_KEY,
         "GCP_PROJECT_ID": GCP_PROJECT_ID,
         "BQ_DATASET": BQ_DATASET,
         "BQ_TABLE": BQ_TABLE,
-        "SERVICE_ACCOUNT_EMAIL": SERVICE_ACCOUNT_EMAIL,
-        "APIFY_API_TOKEN": APIFY_API_TOKEN,
-        "APIFY_ACTOR_ID": APIFY_ACTOR_ID,
     }
     missing = [k for k, v in required.items() if not v]
     if missing:
-        logger.error("=" * 80)
-        logger.error("CONFIGURATION ERROR: Missing env vars")
-        for k in missing:
-            logger.error(f"  ✗ {k} not set")
-        logger.error("=" * 80)
-        sys.exit(1)
+        msg = "Missing required env vars: " + ", ".join(missing)
+        logger.error(msg)
+        raise RuntimeError(msg)
 
-    logger.info("✓ Configuration validated")
-    logger.info(f"  - Project: {GCP_PROJECT_ID}")
-    logger.info(f"  - Dataset.Table: {BQ_DATASET}.{BQ_TABLE}")
-    logger.info(f"  - Apify actor: {APIFY_ACTOR_ID}")
-    logger.info(f"  - JSON column: {BQ_JSON_COLUMN} (as_string={BQ_JSON_AS_STRING})")
 
-# ------------------------------------------------------------------------------
-# Scraper
-# ------------------------------------------------------------------------------
-
+# -------------------------------
+# Scraper core
+# -------------------------------
 class YouTubeTranscriptScraper:
     def __init__(self):
+        validate_configuration()
         self.youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
-        self.apify = ApifyClient(APIFY_API_TOKEN)
         self.bq_client = self._init_bigquery_client()
         self.table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
 
     def _init_bigquery_client(self) -> bigquery.Client:
         if SERVICE_ACCOUNT_KEY_PATH and os.path.exists(SERVICE_ACCOUNT_KEY_PATH):
-            credentials = service_account.Credentials.from_service_account_file(
+            creds = service_account.Credentials.from_service_account_file(
                 SERVICE_ACCOUNT_KEY_PATH,
-                scopes=["https://www.googleapis.com/auth/bigquery"]
+                scopes=["https://www.googleapis.com/auth/bigquery"],
             )
-            logger.info(f"Using SA key: {SERVICE_ACCOUNT_KEY_PATH}")
-            return bigquery.Client(credentials=credentials, project=GCP_PROJECT_ID)
+            logger.info(f"Using service account key at {SERVICE_ACCOUNT_KEY_PATH}")
+            return bigquery.Client(credentials=creds, project=GCP_PROJECT_ID)
 
-        logger.info("Using default Cloud Run credentials")
+        logger.info("Using default credentials")
         return bigquery.Client(project=GCP_PROJECT_ID)
-
-    # ---------------------- BigQuery dedupe ----------------------
 
     def get_existing_video_ids(self) -> Set[str]:
         query = f"SELECT DISTINCT video_id FROM `{self.table_id}`"
         try:
-            logger.info("Fetching existing video_ids from BigQuery...")
-            results = self.bq_client.query(query).result()
-            ids = {row.video_id for row in results if row.video_id}
-            logger.info(f"Found {len(ids)} existing videos")
-            return ids
+            job = self.bq_client.query(query)
+            return {row.video_id for row in job.result()}
         except Exception as e:
             logger.warning(f"Could not fetch existing IDs (continuing anyway): {e}")
             return set()
 
-    # ---------------------- YouTube listing ----------------------
-
     def get_channel_videos(self, channel_id: str, channel_name: str) -> List[str]:
         video_ids: List[str] = []
-        try:
-            logger.info(f"Fetching completed livestreams from {channel_name}...")
 
-            request = self.youtube.search().list(
+        try:
+            logger.info(f"Fetching completed live streams from {channel_name}...")
+            req = self.youtube.search().list(
                 part="id",
                 channelId=channel_id,
                 eventType="completed",
@@ -187,210 +153,178 @@ class YouTubeTranscriptScraper:
                 order="date",
                 maxResults=min(MAX_VIDEOS_PER_CHANNEL, 50),
             )
-            response = request.execute()
+            resp = req.execute()
 
-            for item in response.get("items", []):
+            for item in resp.get("items", []):
                 if item["id"]["kind"] == "youtube#video":
                     video_ids.append(item["id"]["videoId"])
 
-            while "nextPageToken" in response and len(video_ids) < MAX_VIDEOS_PER_CHANNEL:
-                request = self.youtube.search().list(
+            while "nextPageToken" in resp and len(video_ids) < MAX_VIDEOS_PER_CHANNEL:
+                req = self.youtube.search().list(
                     part="id",
                     channelId=channel_id,
                     eventType="completed",
                     type="video",
                     order="date",
                     maxResults=min(MAX_VIDEOS_PER_CHANNEL - len(video_ids), 50),
-                    pageToken=response["nextPageToken"],
+                    pageToken=resp["nextPageToken"],
                 )
-                response = request.execute()
-                for item in response.get("items", []):
+                resp = req.execute()
+
+                for item in resp.get("items", []):
                     if item["id"]["kind"] == "youtube#video":
                         video_ids.append(item["id"]["videoId"])
 
-            logger.info(f"Found {len(video_ids)} videos in {channel_name}")
-            return video_ids
-
         except HttpError as e:
             logger.error(f"YouTube API error for {channel_name}: {e}")
-            return []
         except Exception as e:
-            logger.error(f"Unexpected error listing videos: {e}")
+            logger.error(f"Unexpected error for {channel_name}: {e}")
+
+        logger.info(f"Found {len(video_ids)} videos for {channel_name}")
+        return video_ids
+
+    def get_transcript(self, video_id: str) -> List[Dict]:
+        try:
+            return YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+        except (TranscriptsDisabled, NoTranscriptFound):
+            return []
+        except Exception as primary:
+            logger.info(f"Direct transcript failed for {video_id}: {primary}; trying fallback")
+            try:
+                transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
+                candidates = []
+
+                for finder in (
+                    lambda: transcripts.find_manually_created_transcript(["en", "en-US"]),
+                    lambda: transcripts.find_generated_transcript(["en", "en-US"]),
+                    lambda: transcripts.find_transcript(["en", "en-US"]),
+                ):
+                    try:
+                        candidates.append(finder())
+                    except Exception:
+                        pass
+
+                for cand in candidates:
+                    try:
+                        return cand.fetch()
+                    except Exception:
+                        continue
+
+            except Exception as fallback:
+                logger.warning(f"Fallback list_transcripts failed for {video_id}: {fallback}")
+
             return []
 
-    # ---------------------- Transcript fetch ----------------------
-
-    def _try_youtube_transcript_api(self, video_id: str) -> Optional[List[Dict]]:
-        """Try native transcript API first (cheap + fast)."""
-        try:
-            return YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "en-US"])
-        except (TranscriptsDisabled, NoTranscriptFound):
-            return None
-        except Exception:
-            return None
-
-    def _run_apify_actor(self, video_url: str) -> Optional[Dict]:
-        """
-        Run the Apify actor with a few common input schemas.
-        This avoids schema mismatch errors like:
-        'Property input.videoUrls is not allowed.'
-        """
-        inputs_to_try = [
-            {"startUrls": [{"url": video_url}], "language": APIFY_LANGUAGE},
-            {"startUrl": video_url, "language": APIFY_LANGUAGE},
-            {"videoUrl": video_url, "language": APIFY_LANGUAGE},
-            {"url": video_url, "language": APIFY_LANGUAGE},
-        ]
-
-        last_err = None
-        for actor_input in inputs_to_try:
-            try:
-                run = self.apify.actor(APIFY_ACTOR_ID).call(run_input=actor_input)
-                dataset_id = run.get("defaultDatasetId")
-                if not dataset_id:
-                    last_err = "No dataset id returned"
-                    continue
-
-                items = list(self.apify.dataset(dataset_id).iterate_items())
-                if not items:
-                    last_err = "Apify dataset empty"
-                    continue
-
-                return items[0]
-
-            except ApifyApiError as e:
-                last_err = str(e)
-                continue
-            except Exception as e:
-                last_err = str(e)
-                continue
-
-        logger.error(f"Apify actor failed for {video_url}. Last error: {last_err}")
-        return None
-
-    def get_transcript_payload(self, video_id: str) -> Optional[Dict]:
-        """
-        Returns a payload dict ready for BigQuery insert.
-        Strategy:
-        1) Try youtube_transcript_api (if available)
-        2) Else Apify actor
-        """
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-
-        yt_segments = self._try_youtube_transcript_api(video_id)
-        if yt_segments:
-            logger.info(f"Native transcript OK for {video_id} ({len(yt_segments)} segments)")
-            return {
-                "video_id": video_id,
-                "url": video_url,
-                "source": "youtube_transcript_api",
-                "transcript": yt_segments,
-            }
-
-        logger.info(f"No native transcript for {video_id}. Falling back to Apify...")
-        apify_item = self._run_apify_actor(video_url)
-        if not apify_item:
-            return None
-
-        apify_item["video_id"] = apify_item.get("video_id") or video_id
-        apify_item["url"] = apify_item.get("url") or video_url
-        apify_item["source"] = "apify"
-
-        return apify_item
-
-    # ---------------------- BigQuery upload ----------------------
-
-    def upload_payload_to_bigquery(self, payload: Dict) -> bool:
-        if not payload:
+    def upload_to_bigquery(self, video_id: str, transcript: List[Dict]) -> bool:
+        if not transcript:
             return False
 
-        # Ensure available_languages is a string (BQ schema conflict fix)
-        langs = payload.get("available_languages", [])
-        if isinstance(langs, list):
-            payload["available_languages"] = ",".join(langs)
-
-        row = {
-            "video_id": payload.get("video_id"),
-            "url": payload.get("url"),
-            "title": payload.get("title"),
-            "channel_id": payload.get("channel_id"),
-            "channel_name": payload.get("channel_name"),
-            "published_at": payload.get("published_at"),
-            "status": payload.get("status"),
-            "message": payload.get("message"),
-        }
-
-        # Store full payload as JSON
-        if BQ_JSON_AS_STRING:
-            row[BQ_JSON_COLUMN] = json.dumps(payload, ensure_ascii=False)
-        else:
-            row[BQ_JSON_COLUMN] = payload
+        rows = []
+        for idx, seg in enumerate(transcript):
+            start = float(seg.get("start", 0))
+            dur = float(seg.get("duration", 0))
+            rows.append(
+                {
+                    "video_id": video_id,
+                    "segment_index": idx,
+                    "start_sec": int(start),
+                    "end_sec": int(start + dur),
+                    "text": seg.get("text", ""),
+                }
+            )
 
         try:
-            errors = self.bq_client.insert_rows_json(
-                self.table_id,
-                [row],
-                ignore_unknown_values=True,  # critical for schema drift
-            )
+            errors = self.bq_client.insert_rows_json(self.table_id, rows)
             if errors:
-                logger.error(f"BQ insert errors for {payload.get('video_id')}: {errors}")
+                logger.error(f"BQ insert errors for {video_id}: {errors}")
                 return False
 
-            logger.info(f"✓ Uploaded payload for {payload.get('video_id')}")
+            logger.info(f"Uploaded {len(rows)} segments for {video_id}")
             return True
 
         except Exception as e:
-            logger.error(f"BQ upload failed: {e}")
+            logger.error(f"BQ upload error for {video_id}: {e}")
             return False
-
-    # ---------------------- Pipeline ----------------------
 
     def process_video(self, video_id: str) -> bool:
-        logger.info(f"Processing video {video_id}...")
-        payload = self.get_transcript_payload(video_id)
-        if not payload:
-            logger.warning(f"Skipping {video_id} (no transcript)")
+        transcript = self.get_transcript(video_id)
+        if not transcript:
+            logger.info(f"No transcript for {video_id}; skipping")
             return False
-        return self.upload_payload_to_bigquery(payload)
+        return self.upload_to_bigquery(video_id, transcript)
 
-    def run(self):
-        existing_ids = self.get_existing_video_ids()
+    def run_once(self) -> Dict[str, int]:
+        existing = self.get_existing_video_ids()
 
         processed = skipped = failed = 0
 
         for ch in CHANNELS:
-            logger.info("=" * 80)
-            logger.info(f"Channel: {ch['name']}")
-            logger.info("=" * 80)
-
             vids = self.get_channel_videos(ch["channel_id"], ch["name"])
-            new_vids = [v for v in vids if v not in existing_ids]
+            new_vids = [v for v in vids if v not in existing]
+            skipped += len(vids) - len(new_vids)
 
-            skipped += (len(vids) - len(new_vids))
-            logger.info(f"{len(vids)} total, {len(new_vids)} new, {len(vids)-len(new_vids)} skipped")
-
-            for vid in new_vids:
-                ok = self.process_video(vid)
+            for v in new_vids:
+                ok = self.process_video(v)
                 if ok:
                     processed += 1
                 else:
                     failed += 1
-                time.sleep(2)
+                time.sleep(1.5)
 
-        logger.info("\n" + "=" * 80)
-        logger.info("SUMMARY")
-        logger.info("=" * 80)
-        logger.info(f"Processed: {processed}")
-        logger.info(f"Skipped:   {skipped}")
-        logger.info(f"Failed:    {failed}")
-        logger.info("=" * 80)
+        return {"processed": processed, "skipped": skipped, "failed": failed}
 
 
-def main():
-    validate_configuration()
+# -------------------------------
+# Service wrapper state
+# -------------------------------
+_last_summary: Optional[Dict[str, int]] = None
+_is_running = False
+_lock = threading.Lock()
+
+
+def _run_scrape_job():
+    global _last_summary, _is_running
+
+    with _lock:
+        if _is_running:
+            logger.info("Scrape already running; refusing to start another.")
+            return
+        _is_running = True
+
     try:
-        YouTubeTranscriptScraper().run()
-        sys.exit(0)
+        scraper = YouTubeTranscriptScraper()
+        summary = scraper.run_once()
+        _last_summary = summary
+        logger.info(f"Scrape summary: {summary}")
+
+    except Exception as e:
+        logger.error(f"Scrape fatal error: {e}", exc_info=True)
+        _last_summary = {"processed": 0, "skipped": 0, "failed": 0}
+
+    finally:
+        with _lock:
+            _is_running = False
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "running": _is_running, "last_summary": _last_summary}
+
+
+@app.post("/run")
+def run(background_tasks: BackgroundTasks):
+    background_tasks.add_task(_run_scrape_job)
+    return {"started": True, "running": True}
+
+
+# -------------------------------
+# CLI entrypoint
+# -------------------------------
+def main():
+    try:
+        scraper = YouTubeTranscriptScraper()
+        summary = scraper.run_once()
+        logger.info(f"Done. Summary: {summary}")
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)

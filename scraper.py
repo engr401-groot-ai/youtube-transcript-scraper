@@ -25,6 +25,7 @@ import sys
 import logging
 import time
 import threading
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Set, Optional, Any
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -246,6 +247,10 @@ class YouTubeTranscriptScraper:
                 video_name = items[0].get("snippet", {}).get("title", "") or ""
         except Exception as e:
             logger.debug(f"Could not fetch video title for {video_id}: {e}")
+        
+        # Capute the current time once for the whole batch (hst)
+        hst = timezone(timedelta(hours=-10))
+        now_timestamp = datetime.now(tz=hst).isoformat()
 
         rows = []
         for idx, seg in enumerate(segments):
@@ -258,6 +263,7 @@ class YouTubeTranscriptScraper:
                     "start_sec": int(start),
                     "end_sec": int(end),
                     "text": seg.get("text", ""),
+                    "created_at": now_timestamp,
                     "video_url": f"https://www.youtube.com/watch?v={video_id}",
                     "video_name": video_name,
                 }

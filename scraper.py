@@ -26,9 +26,8 @@ import logging
 import time
 import threading
 from typing import List, Dict, Set, Optional, Any
-
 from dotenv import load_dotenv
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.cloud import bigquery, secretmanager
@@ -80,7 +79,7 @@ GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
 BQ_DATASET = os.getenv("BQ_DATASET", "")
 BQ_TABLE = os.getenv("BQ_TABLE", "")
 SERVICE_ACCOUNT_KEY_PATH = os.getenv("SERVICE_ACCOUNT_KEY_PATH")  # optional local
-MAX_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_VIDEOS_PER_CHANNEL", "50"))
+MAX_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_VIDEOS_PER_CHANNEL", "10"))
 
 # Apify config
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
@@ -238,6 +237,16 @@ class YouTubeTranscriptScraper:
         if not segments:
             return False
 
+        # Try to fetch the video's title once (avoid per-segment API calls)
+        video_name = ""
+        try:
+            resp = self.youtube.videos().list(part="snippet", id=video_id).execute()
+            items = resp.get("items", [])
+            if items:
+                video_name = items[0].get("snippet", {}).get("title", "") or ""
+        except Exception as e:
+            logger.debug(f"Could not fetch video title for {video_id}: {e}")
+
         rows = []
         for idx, seg in enumerate(segments):
             start = float(seg.get("start", 0))
@@ -249,6 +258,8 @@ class YouTubeTranscriptScraper:
                     "start_sec": int(start),
                     "end_sec": int(end),
                     "text": seg.get("text", ""),
+                    "video_url": f"https://www.youtube.com/watch?v={video_id}",
+                    "video_name": video_name,
                 }
             )
 
@@ -283,6 +294,7 @@ class YouTubeTranscriptScraper:
             skipped += len(vids) - len(new_vids)
 
             for v in new_vids:
+                logger.info(f"Processing new video: {v}")
                 ok = self.process_video(v)
                 if ok:
                     processed += 1
@@ -331,10 +343,9 @@ def health():
 
 
 @app.post("/run")
-def run(background_tasks: BackgroundTasks):
-    background_tasks.add_task(_run_scrape_job)
-    return {"started": True, "running": True}
-
+def run():
+    _run_scrape_job()
+    return {"status": "completed", "summary": _last_summary}
 
 # -------------------------------
 # CLI entrypoint

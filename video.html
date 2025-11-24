@@ -14,6 +14,8 @@
             .meta { color: #666; font-size: 0.9em; margin-bottom: 6px; }
             .text { white-space: pre-wrap; }
             .container { display: flex; gap: var(--gap); margin-top: 18px; }
+            .right-header button.tab-btn { padding: 8px 12px; }
+            .right-header button.tab-btn:disabled { opacity: 0.65; cursor: default; }
             .left { flex: 0 0 40%; }
             .right { flex: 1 1 60%; border-left: 1px solid #eee; }
             .right-header { padding-left: 12px; }
@@ -45,8 +47,8 @@
             <!-- Transcript and mentions -->
             <div class="right">
                 <div class="right-header">
-                    <button id="trans-tab-btn">Transcript</button>
-                    <button id="mn-tab-btn" style="margin-left: 8px;">Mentions</button>
+                    <button id="trans-tab-btn" class="tab-btn" disabled>Transcript</button>
+                    <button id="mn-tab-btn" class="tab-btn" style="margin-left: 8px;">Mentions</button>
                 </div>
                 <div class="right-content">
                     <div id="transcript-pane">
@@ -227,13 +229,21 @@
             }
 
             function showSegments() {
+                const transBtn = document.getElementById('trans-tab-btn');
+                const mnBtn = document.getElementById('mn-tab-btn');
                 document.getElementById('transcript-pane').style.display = '';
                 document.getElementById('mentions-pane').style.display = 'none';
+                if (transBtn) { transBtn.disabled = true; }
+                if (mnBtn) { mnBtn.disabled = false; }
             }
 
             function showMentions() {
+                const transBtn = document.getElementById('trans-tab-btn');
+                const mnBtn = document.getElementById('mn-tab-btn');
                 document.getElementById('transcript-pane').style.display = 'none';
                 document.getElementById('mentions-pane').style.display = '';
+                if (transBtn) { transBtn.disabled = false; }
+                if (mnBtn) { mnBtn.disabled = true; }
             }
 
             // Fetch video details (transcript + mentions) on load and render

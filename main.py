@@ -768,6 +768,50 @@ def list_mentions(
 
     return {"count": len(out), "results": out}
 
+@app.get("/api/mentions/recent")
+def get_recent_mentions(
+    hours: int = Query(24, ge=1, description="How many hours back to fetch"),
+):
+    """
+    Returns mentions created in the last X hours.
+    """
+
+    client = bigquery.Client(project=GCP_PROJECT_ID)
+    table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_MENTIONS_TABLE}"
+
+    sql = f"""
+    SELECT video_name, keyword, text, video_url, start_sec, created_at
+    FROM `{table_id}`
+    WHERE CAST(created_at AS TIMESTAMP) > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+    ORDER BY created_at DESC
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("hours", "INT64", hours),
+        ]
+    )
+
+    rows = client.query(sql, job_config=job_config).result()
+
+    results = []
+    for r in rows:
+        try:
+            link = f"{r.video_url}&t={int(r.start_sec)}s"
+        except Exception:
+            link = getattr(r, "video_url", None)
+
+        results.append({
+            "video_name": getattr(r, "video_name", None),
+            "keyword": getattr(r, "keyword", None),
+            "text": getattr(r, "text", None),
+            "video_url": getattr(r, "video_url", None),
+            "link": link,
+            "start_sec": getattr(r, "start_sec", None),
+            "created_at": str(getattr(r, "created_at", None)),
+        })
+
+    return {"count": len(results), "results": results}
 
 @app.get("/keywords")
 def keywords():

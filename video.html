@@ -1,0 +1,281 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>%%TITLE%%</title>
+        <style>
+            :root { --gap: 18px; }
+            body { font-family: system-ui, sans-serif; margin: 24px; }
+            a { color: #0366d6; }
+            .back-link { display: inline-block; margin-bottom: 8px; color: #0366d6; text-decoration: underline; background: transparent; border: 0; padding: 0; cursor: pointer; }
+            input { width: 360px; padding: 8px; }
+            button { padding: 8px 12px; margin-left: 6px; }
+            .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin: 10px 0; }
+            .meta { color: #666; font-size: 0.9em; margin-bottom: 6px; }
+            .text { white-space: pre-wrap; }
+            .container { display: flex; gap: var(--gap); margin-top: 18px; }
+            .left { flex: 0 0 40%; }
+            .right { flex: 1 1 60%; border-left: 1px solid #eee; }
+            .right-header { padding-left: 12px; }
+            .right-content { padding-left: 12px; max-height: 75vh; overflow: auto; }
+            h2.title { font-size: 1.25rem; margin: 0 0 10px 0; }
+            .player-wrap { background: #000; min-height: 360px; display: flex; align-items: center; justify-content: center; }
+            .transcript-seg { padding: 8px; border-bottom: 1px solid #f1f1f1; }
+            .active-seg { background: #fff8e1; transition: background 0.6s ease; }
+            .seg-time { color: #0366d6; cursor: pointer; margin-right: 8px; font-weight: 600; }
+            .seg-text { white-space: pre-wrap; }
+        </style>
+    </head>
+    <body>
+        <div>
+            <a class="back-link" href="/ui">← Back</a>
+        </div>
+        <div>
+            <h2 class="title">%%TITLE%%</h2>
+        </div>
+
+        <div class="container">
+            <!-- YouTube player container -->
+            <div class="left">
+                <div class="player-wrap">
+                    <div id="ytplayer"></div>
+                </div>
+            </div>
+
+            <!-- Transcript and mentions -->
+            <div class="right">
+                <div class="right-header">
+                    <button id="trans-tab-btn">Transcript</button>
+                    <button id="mn-tab-btn" style="margin-left: 8px;">Mentions</button>
+                </div>
+                <div class="right-content">
+                    <div id="transcript-pane">
+                        <p style="color: #666">Transcript will appear here</p>
+                    </div>
+                    <div id="mentions-pane" style="display: none"></div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            // YouTube IFrame API setup
+            var player;
+            var INITIAL_START = 0;
+            try {
+                const _p = new URLSearchParams(window.location.search || '');
+                const t = _p.get('t');
+                if (t) INITIAL_START = Number.parseInt(t) || 0;
+            } catch (e) { INITIAL_START = 0; }
+
+            function onYouTubeIframeAPIReady() {
+                player = new YT.Player('ytplayer', {
+                    height: '360',
+                    width: '100%',
+                    videoId: '%%VIDEO_ID%%',
+                    playerVars: { rel: 0 },
+                    events: {
+                        onReady: function (e) {
+                            if (INITIAL_START && typeof e.target.seekTo === 'function') {
+                                try { e.target.seekTo(Number(INITIAL_START), true); }
+                                catch (err) { console.warn('seek on ready failed', err); }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Seek the player to `sec` (seconds) and play
+            function seekTo(sec) {
+                if (!player || typeof player.seekTo !== 'function') return;
+                try { player.seekTo(Number(sec), true); player.playVideo(); } catch (e) { console.warn('seek error', e); }
+                try { scrollToNearestSegment(Number(sec)); } catch (e) { /*ignore*/ }
+            }
+
+            // Helper to format seconds as mm:ss or hh:mm:ss
+            function formatTime(sec) {
+                sec = Number(sec) || 0;
+                var h = Math.floor(sec / 3600);
+                var m = Math.floor((sec % 3600) / 60);
+                var s = Math.floor(sec % 60);
+                function pad(n) { return n.toString().padStart(2, '0'); }
+                if (h > 0) return h + ':' + pad(m) + ':' + pad(s);
+                return m + ':' + pad(s);
+            }
+
+            // Page state
+            const VIDEO_ID = '%%VIDEO_ID%%';
+            let transcriptSegments = [];
+            let videoMentions = [];
+
+            // Render transcript segments (array of {segment_index, start_sec, end_sec, text}) into right column
+            function renderTranscript(segments) {
+                const root = document.getElementById('transcript-pane');
+                root.innerHTML = '';
+                if (!segments || segments.length === 0) {
+                    root.innerHTML = '<p style="color:#666">No transcript available for this video.</p>';
+                    return;
+                }
+                // deduplicate by segment_index (keep first) then ensure ascending by segment_index
+                const seen = new Set();
+                const deduped = [];
+                for (const s of segments) {
+                    const idx = typeof s.segment_index !== 'undefined' ? s.segment_index : null;
+                    if (idx !== null) {
+                        if (seen.has(idx)) continue;
+                        seen.add(idx);
+                    }
+                    deduped.push(s);
+                }
+                deduped.sort((a, b) => (a.segment_index || 0) - (b.segment_index || 0));
+                transcriptSegments = deduped.slice();
+                for (const seg of deduped) {
+                    const row = document.createElement('div');
+                    row.className = 'card transcript-seg';
+                    if (typeof seg.segment_index !== 'undefined' && seg.segment_index !== null) { row.id = `seg-${seg.segment_index}`; }
+                    row.style.display = 'flex';
+                    row.style.alignItems = 'flex-start';
+                    // left: timestamp
+                    const left = document.createElement('div');
+                    left.style.width = '80px';
+                    left.style.flex = '0 0 80px';
+                    left.innerHTML = `<span class="seg-time" onclick="seekTo(${Math.floor(seg.start_sec)})">${formatTime(seg.start_sec)}</span>`;
+                    // right: text
+                    const right = document.createElement('div');
+                    right.style.flex = '1 1 auto';
+                    right.innerHTML = `<div class="seg-text">${escapeHtml(seg.text || '')}</div>`;
+                    row.appendChild(left);
+                    row.appendChild(right);
+                    root.appendChild(row);
+                }
+            }
+
+            function scrollToNearestSegment(sec) {
+                if (sec === null || typeof sec === 'undefined') return;
+                // find nearest segment by start_sec
+                let best = null;
+                for (const s of transcriptSegments) {
+                    const st = Number(s.start_sec || 0);
+                    if (best === null) { best = s; continue; }
+                    if (st >= sec) { best = s; break; }
+                    best = s;
+                }
+                if (!best) return;
+                const idx = best.segment_index;
+                if (typeof idx === 'undefined' || idx === null) return;
+                const el = document.getElementById(`seg-${idx}`);
+                if (!el) return;
+                try {
+                    // scroll the nearest scrollable ancestor (.right-content)
+                    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    el.classList.add('active-seg');
+                    setTimeout(() => el.classList.remove('active-seg'), 1800);
+                } catch (e) { console.warn('scroll error', e); }
+            }
+
+            // Render mentions list (array of {segment_index, start_sec, text, keyword})
+            function renderMentions(mentions) {
+                const root = document.getElementById('mentions-pane');
+                root.innerHTML = '';
+                if (!mentions || mentions.length === 0) {
+                    root.innerHTML = '<p style="color:#666">No mentions found for this video.</p>';
+                    return;
+                }
+                // ensure ascending by start_sec
+                mentions.sort((a, b) => (a.start_sec || 0) - (b.start_sec || 0));
+                for (const m of mentions) {
+                    const row = document.createElement('div');
+                    row.className = 'card transcript-seg';
+                    row.style.display = 'flex';
+                    row.style.alignItems = 'flex-start';
+                    const left = document.createElement('div');
+                    left.style.width = '80px';
+                    left.style.flex = '0 0 80px';
+                    left.innerHTML = `<span class="seg-time" onclick="seekTo(${Math.floor(m.start_sec)})">${formatTime(m.start_sec)}</span>`;
+                    const right = document.createElement('div');
+                    right.style.flex = '1 1 auto';
+                    // highlight the keyword occurrences in the text
+                    const text = m.text || '';
+                    const kw = m.keyword || '';
+                    const highlighted = kw ? highlightKeyword(text, kw) : escapeHtml(text);
+                    right.innerHTML = `<div class="seg-text">${highlighted}</div>`;
+                    row.appendChild(left);
+                    row.appendChild(right);
+                    root.appendChild(row);
+                }
+            }
+
+            // Helpers
+            function escapeHtml(str) {
+                if (!str) return '';
+                return str.replace(/[&<>\"']/g, function (c) {
+                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": "&#39;" }[c];
+                });
+            }
+
+            function escapeRegex(str) {
+                return str.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
+            }
+
+            function highlightKeyword(text, kw) {
+                if (!kw) return escapeHtml(text);
+                try {
+                    const re = new RegExp('(' + escapeRegex(kw) + ')', 'ig');
+                    return escapeHtml(text).replace(re, '<mark>$1</mark>');
+                } catch (e) {
+                    return escapeHtml(text);
+                }
+            }
+
+            function showSegments() {
+                document.getElementById('transcript-pane').style.display = '';
+                document.getElementById('mentions-pane').style.display = 'none';
+            }
+
+            function showMentions() {
+                document.getElementById('transcript-pane').style.display = 'none';
+                document.getElementById('mentions-pane').style.display = '';
+            }
+
+            // Fetch video details (transcript + mentions) on load and render
+            async function loadVideoData() {
+                const txRoot = document.getElementById('transcript-pane');
+                const mnRoot = document.getElementById('mentions-pane');
+                // show loading indicators
+                if (txRoot) txRoot.innerHTML = '<p style="color:#666">Loading transcript…</p>';
+                if (mnRoot) mnRoot.innerHTML = '<p style="color:#666">Loading mentions…</p>';
+
+                try {
+                    const resp = await fetch(`/video/${VIDEO_ID}`);
+                    if (!resp.ok) {
+                        console.warn('Could not fetch video data', resp.status);
+                        if (txRoot) txRoot.innerHTML = '<p style="color:#666">Error loading transcript.</p>';
+                        if (mnRoot) mnRoot.innerHTML = '<p style="color:#666">Error loading mentions.</p>';
+                        return;
+                    }
+                    const data = await resp.json();
+                    transcriptSegments = data.transcript || [];
+                    videoMentions = data.mentions || [];
+                    renderTranscript(transcriptSegments);
+                    renderMentions(videoMentions);
+                    try { if (INITIAL_START) scrollToNearestSegment(INITIAL_START); } catch (e) { /*ignore*/ }
+                } catch (e) {
+                    console.error('loadVideoData error', e);
+                    if (txRoot) txRoot.innerHTML = '<p style="color:#666">Error loading transcript.</p>';
+                    if (mnRoot) mnRoot.innerHTML = '<p style="color:#666">Error loading mentions.</p>';
+                }
+            }
+        </script>
+        <script src="https://www.youtube.com/iframe_api"></script>
+        <script>
+            // initialize data load after DOM is ready
+            window.addEventListener('DOMContentLoaded', function () {
+                loadVideoData();
+                showSegments();
+                const transBtn = document.getElementById('trans-tab-btn');
+                const mentionsBtn = document.getElementById('mn-tab-btn');
+                if (transBtn) transBtn.addEventListener('click', showSegments);
+                if (mentionsBtn) mentionsBtn.addEventListener('click', showMentions);
+            });
+        </script>
+    </body>
+</html>

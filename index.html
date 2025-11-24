@@ -1,0 +1,223 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>UH Explicit Mentions Search</title>
+        <style>
+            body { font-family: system-ui, sans-serif; margin: 24px; }
+            input { width: 360px; padding: 8px; }
+            button { padding: 8px 12px; margin-left: 6px; }
+            .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin: 10px 0; }
+            .meta { color: #666; font-size: 0.9em; margin-bottom: 6px; }
+            .text { white-space: pre-wrap; }
+        </style>
+    </head>
+    <body>
+        <h2>UH Explicit Mentions</h2>
+        <p>Search explicit mention segments or browse videos</p>
+
+        <!-- Tabs -->
+        <div style="margin-bottom: 12px;">
+            <button id="tab-videos-btn" onclick="showVideosTab()">Videos</button>
+            <button id="tab-mentions-btn" onclick="showMentionsTab()">Mentions</button>
+        </div>
+
+        <div style="margin-bottom: 12px;">
+            <input id="q_shared" placeholder="Search videos or mentions" style="width:420px;" />
+            <button onclick="doSearch()">Search</button>
+            <button onclick="clearSearch()">Clear</button>
+            <span id="status_videos" style="margin-left: 12px; display: inline-block;"></span>
+            <span id="status_mentions" style="margin-left: 12px; display: none;"></span>
+        </div>
+
+        <div id="videos-tab" style="display: none;">
+            <div id="videos-results"></div>
+        </div>
+
+        <div id="mentions-tab">
+            <div id="results"></div>
+        </div>
+
+        <script>
+            async function runMentionSearch() {
+                const q = document.getElementById("q_shared").value.trim();
+                if (!q) { return; }
+                document.getElementById("status_mentions").textContent = " searching...";
+                const res = await fetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
+                const data = await res.json();
+                document.getElementById("status_mentions").textContent = ` ${data.count} results`;
+                const root = document.getElementById("results");
+                root.innerHTML = "";
+                for (const r of data.results) {
+                    const div = document.createElement("div");
+                    div.className = "card";
+                    div.innerHTML = `
+                        <div class="meta"><b>${r.video_name || r.video_id}</b></div>
+                        <div class="meta">keyword: <code>${r.keyword}</code> • start: ${r.start_sec}s</div>
+                        <div class="text">${r.text}</div>
+                        <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
+                    `;
+                    root.appendChild(div);
+                }
+            }
+
+            let allVideos = [];
+            let allMentions = [];
+
+            function showVideosTab() {
+                document.getElementById('videos-tab').style.display = '';
+                document.getElementById('mentions-tab').style.display = 'none';
+                document.getElementById('tab-videos-btn').disabled = true;
+                document.getElementById('tab-mentions-btn').disabled = false;
+                const el = document.getElementById('q_shared');
+                if (el) { el.placeholder = 'Search videos by title'; }
+                const sv = document.getElementById('status_videos'); const sm = document.getElementById('status_mentions');
+                if (sv) sv.style.display = '';
+                if (sm) sm.style.display = 'none';
+                if (allVideos && allVideos.length > 0) {
+                    renderVideoResults(allVideos);
+                } else {
+                    loadVideosAndCounts();
+                }
+            }
+
+            function showMentionsTab() {
+                document.getElementById('videos-tab').style.display = 'none';
+                document.getElementById('mentions-tab').style.display = '';
+                document.getElementById('tab-videos-btn').disabled = false;
+                document.getElementById('tab-mentions-btn').disabled = true;
+                const el = document.getElementById('q_shared');
+                if (el) { el.placeholder = 'Search mentions (e.g., board of regents, mauna kea)'; }
+                const sv = document.getElementById('status_videos'); const sm = document.getElementById('status_mentions');
+                if (sv) sv.style.display = 'none';
+                if (sm) sm.style.display = '';
+                if (allMentions && allMentions.length > 0) {
+                    renderMentions(allMentions);
+                } else {
+                    loadMentionsDefault();
+                }
+            }
+
+            async function loadVideosAndCounts() {
+                const resp = await fetch(`/list-videos?limit=100`);
+                const vids = await resp.json();
+                allVideos = vids.results || [];
+                renderVideoResults(allVideos);
+            }
+
+            async function loadMentionsDefault() {
+                const st = document.getElementById('status_mentions'); if (st) st.textContent = ''; 
+                try {
+                    const resp = await fetch(`/list_mentions?limit=100`);
+                    const data = await resp.json();
+                    const root = document.getElementById('results');
+                    root.innerHTML = '';
+                    const items = data.results || [];
+                    // cache for instant rendering when switching tabs or clearing
+                    allMentions = items.slice();
+                    for (const r of items) {
+                        const div = document.createElement('div');
+                        div.className = 'card';
+                        const ts_url = r.timestamp_url || ((r.video_url && typeof r.start_sec !== 'undefined') ? `${r.video_url}&t=${Math.floor(r.start_sec)}s` : (r.video_url || '#'));
+                        div.innerHTML = `
+                            <div class="meta"><b>${r.video_name || r.video_id}</b></div>
+                            <div class="meta">keyword: <code>${r.keyword || ''}</code> • start: ${r.start_sec || ''}s</div>
+                            <div class="text">${r.text || ''}</div>
+                            <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
+                        `;
+                        root.appendChild(div);
+                    }
+                    if (st) st.textContent = ` ${items.length} results`;
+                } catch (err) {
+                    if (st) st.textContent = ' error loading mentions';
+                    console.error('loadMentionsDefault error', err);
+                }
+            }
+
+            // Render a list of mention objects
+            function renderMentions(items) {
+                const root = document.getElementById('results');
+                root.innerHTML = '';
+                for (const r of items) {
+                    const div = document.createElement('div');
+                    div.className = 'card';
+                    const ts_url = r.timestamp_url || ((r.video_url && typeof r.start_sec !== 'undefined') ? `${r.video_url}&t=${Math.floor(r.start_sec)}s` : (r.video_url || '#'));
+                    div.innerHTML = `
+                        <div class="meta"><b>${r.video_name || r.video_id}</b></div>
+                        <div class="meta">keyword: <code>${r.keyword || ''}</code> • start: ${r.start_sec || ''}s</div>
+                        <div class="text">${r.text || ''}</div>
+                        <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
+                    `;
+                    root.appendChild(div);
+                }
+                const st = document.getElementById('status_mentions'); if (st) st.textContent = ` ${items.length} results`;
+            }
+
+            function renderVideoResults(videos) {
+                const root = document.getElementById('videos-results');
+                root.innerHTML = '';
+                for (const v of videos) {
+                    const div = document.createElement('div');
+                    div.className = 'card';
+                    const title = v.video_name || v.video_id;
+                    div.innerHTML = `
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <div>
+                                <div class="meta"><b>${title} || ${v.video_id}</b></div>
+                                <div class="meta">mentions: ${v.mention_count ?? 0}</div>
+                            </div>
+                            <div style="display:flex;gap:8px;align-items:center;">
+                                <a href="${v.video_url}" target="_blank" title="Open video" style="font-size:1.1em;text-decoration:none;">↗</a>
+                            </div>
+                        </div>
+                        <div style="margin-top:8px;"><a href="/video/${v.video_id}/view" target="_blank">View More</a></div>
+                    `;
+                    root.appendChild(div);
+                }
+                const sv = document.getElementById('status_videos'); if (sv) sv.textContent = ` ${videos.length} videos`;
+            }
+
+            function runVideoSearch() {
+                const q = document.getElementById('q_shared').value.trim().toLowerCase();
+                if (!q) {
+                    renderVideoResults(allVideos);
+                    return;
+                }
+                const filtered = allVideos.filter(v => (v.video_name || '').toLowerCase().includes(q) || (v.video_id || '').toLowerCase().includes(q));
+                renderVideoResults(filtered);
+                const sv = document.getElementById('status_videos'); if (sv) sv.textContent = ` ${filtered.length} videos`;
+            }
+
+            function doSearch() {
+                // Call the appropriate search based on active tab
+                const videosVisible = document.getElementById('videos-tab').style.display !== 'none';
+                if (videosVisible) {
+                    runVideoSearch();
+                } else {
+                    runMentionSearch();
+                }
+            }
+
+            function clearSearch() {
+                const el = document.getElementById('q_shared');
+                if (el) { el.value = ''; }
+                // reset results depending on tab
+                const videosVisible = document.getElementById('videos-tab').style.display !== 'none';
+                if (videosVisible) { renderVideoResults(allVideos); }
+                else {
+                    // restore the cached full mentions list (or reload if empty)
+                    if (allMentions && allMentions.length > 0) {
+                        renderMentions(allMentions);
+                    } else {
+                        loadMentionsDefault();
+                    }
+                }
+            }
+
+            // initialize
+            showVideosTab();
+            loadVideosAndCounts();
+            loadMentionsDefault();
+        </script>
+    </body>
+</html>

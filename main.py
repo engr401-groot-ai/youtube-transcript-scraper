@@ -34,6 +34,7 @@ import html as html_escape
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.cloud import bigquery, secretmanager
+from google.cloud import run_v2
 import google.auth
 from apify_client import ApifyClient
 
@@ -87,6 +88,7 @@ EXPLICIT_SHEET_RANGE = os.getenv("EXPLICIT_SHEET_RANGE", "")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
 APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "starvibe/youtube-video-transcript")
 APIFY_LANGUAGE = os.getenv("APIFY_LANGUAGE", "en")
+CLOUD_RUN_REGION = os.getenv("CLOUD_RUN_REGION", "us-central1")
 
 MAX_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_VIDEOS_PER_CHANNEL", "10"))
 
@@ -442,6 +444,27 @@ class YouTubeTranscriptScraper:
 
         return {"processed": processed, "skipped": skipped, "failed": failed}
 
+def trigger_notification_job():
+    """
+    Trigger the Cloud Run Job named `notifier-job` in `CLOUD_RUN_REGION`.
+    This uses the Cloud Run Admin client (run_v2). The function logs errors
+    but does not raise so it won't crash the scraper on notification failures.
+    """
+    if not GCP_PROJECT_ID:
+        logger.warning("GCP_PROJECT_ID not configured; cannot trigger notifier job")
+        return
+
+    location = CLOUD_RUN_REGION
+    job_name = f"projects/{GCP_PROJECT_ID}/locations/{location}/jobs/notifier-job"
+
+    try:
+        client = run_v2.JobsClient()
+        request = run_v2.RunJobRequest(name=job_name)
+        client.run_job(request=request)
+        logger.info(f"Successfully triggered notification job: {job_name}")
+    except Exception as e:
+        logger.error(f"Failed to trigger notification job {job_name}: {e}")
+        return
 
 # -------------------------------
 # Service wrapper state
@@ -464,6 +487,15 @@ def _run_scrape_job():
         summary = scraper.run_once()
         _last_summary = summary
         logger.info(f"Scrape summary: {summary}")
+
+        try:
+            if isinstance(summary, dict) and summary.get("processed", 0) > 0:
+                logger.info("New videos found! Triggering the notification job...")
+                trigger_notification_job()
+            else:
+                logger.info("No new videos. Skipping notification job trigger.")
+        except Exception as e:
+            logger.warning(f"Error while attempting to trigger notification job: {e}")
 
     except Exception as e:
         logger.error(f"Scrape fatal error: {e}", exc_info=True)

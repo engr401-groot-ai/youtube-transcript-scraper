@@ -42,7 +42,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("scraper")
 
-app = FastAPI(title="UH YouTube Transcript Scraper (Apify)", version="0.3.0")
+app = FastAPI(title="UH YouTube Transcript Scraper (Apify)", version="0.4.0")
 
 
 # -------------------------------
@@ -79,6 +79,8 @@ YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
 BQ_DATASET = os.getenv("BQ_DATASET", "")
 BQ_TABLE = os.getenv("BQ_TABLE", "")
+BQ_MENTIONS_TABLE = os.getenv("BQ_MENTIONS_TABLE", "uh_mentions_explicit")
+EXPLICIT_KEYWORDS = [k.strip().lower() for k in os.getenv("EXPLICIT_KEYWORDS", "").split(",") if k.strip()]
 SERVICE_ACCOUNT_KEY_PATH = os.getenv("SERVICE_ACCOUNT_KEY_PATH")  # optional local
 MAX_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_VIDEOS_PER_CHANNEL", "10"))
 
@@ -117,6 +119,7 @@ class YouTubeTranscriptScraper:
         self.youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
         self.bq_client = self._init_bigquery_client()
         self.table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
+        self.mentions_table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_MENTIONS_TABLE}"
         self.apify = ApifyClient(APIFY_TOKEN)
 
     def _init_bigquery_client(self) -> bigquery.Client:
@@ -195,7 +198,6 @@ class YouTubeTranscriptScraper:
             "language": APIFY_LANGUAGE,
         }
 
-        # Retry a few times because Apify / YT can be flaky
         last_err = None
         for attempt in range(1, 4):
             try:
@@ -211,7 +213,6 @@ class YouTubeTranscriptScraper:
                     logger.warning(f"Empty Apify dataset for {video_id}")
                     return []
 
-                # Actor returns one item per video
                 item = items[0]
                 transcript = item.get("transcript") or []
 
@@ -234,11 +235,10 @@ class YouTubeTranscriptScraper:
         logger.error(f"Apify transcript failed for {video_id}: {last_err}")
         return []
 
-    def upload_to_bigquery(self, video_id: str, segments: List[Dict[str, Any]]) -> bool:
+    def upload_to_bigquery(self, video_id: str, segments: List[Dict[str, Any]]) -> tuple[bool, str, str]:
         if not segments:
-            return False
+            return (False, "", "")
 
-        # Try to fetch the video's title once (avoid per-segment API calls)
         video_name = ""
         try:
             resp = self.youtube.videos().list(part="snippet", id=video_id).execute()
@@ -247,8 +247,7 @@ class YouTubeTranscriptScraper:
                 video_name = items[0].get("snippet", {}).get("title", "") or ""
         except Exception as e:
             logger.debug(f"Could not fetch video title for {video_id}: {e}")
-        
-        # Capute the current time once for the whole batch (hst)
+
         hst = timezone(timedelta(hours=-10))
         now_timestamp = datetime.now(tz=hst).isoformat()
 
@@ -273,13 +272,62 @@ class YouTubeTranscriptScraper:
             errors = self.bq_client.insert_rows_json(self.table_id, rows)
             if errors:
                 logger.error(f"BQ insert errors for {video_id}: {errors}")
-                return False
+                return (False, video_name, now_timestamp)
 
             logger.info(f"Uploaded {len(rows)} segments for {video_id}")
-            return True
+            return (True, video_name, now_timestamp)
 
         except Exception as e:
             logger.error(f"BQ upload error for {video_id}: {e}")
+            return (False, video_name, now_timestamp)
+
+    def extract_explicit_mentions(
+        self,
+        video_id: str,
+        segments: List[Dict[str, Any]],
+        video_name: str,
+        now_timestamp: str,
+    ) -> List[Dict[str, Any]]:
+        if not EXPLICIT_KEYWORDS:
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for idx, seg in enumerate(segments):
+            text = seg.get("text", "") or ""
+            lt = text.lower()
+            for kw in EXPLICIT_KEYWORDS:
+                if kw in lt:
+                    start = int(float(seg.get("start", 0)))
+                    end = int(float(seg.get("end", start)))
+                    rows.append(
+                        {
+                            "video_id": video_id,
+                            "segment_index": idx,
+                            "start_sec": start,
+                            "end_sec": end,
+                            "text": text,
+                            "video_url": f"https://www.youtube.com/watch?v={video_id}",
+                            "video_name": video_name,
+                            "keyword": kw,
+                            "created_at": now_timestamp,
+                        }
+                    )
+                    break
+        return rows
+
+    def upload_mentions(self, rows: List[Dict[str, Any]]) -> bool:
+        if not rows:
+            return True
+        vid = rows[0]["video_id"]
+        try:
+            errors = self.bq_client.insert_rows_json(self.mentions_table_id, rows)
+            if errors:
+                logger.error(f"BQ mention insert errors for {vid}: {errors}")
+                return False
+            logger.info(f"Uploaded {len(rows)} explicit mention segments for {vid}")
+            return True
+        except Exception as e:
+            logger.error(f"BQ mention upload error for {vid}: {e}")
             return False
 
     def process_video(self, video_id: str) -> bool:
@@ -287,7 +335,11 @@ class YouTubeTranscriptScraper:
         if not segments:
             logger.info(f"No transcript for {video_id}; skipping")
             return False
-        return self.upload_to_bigquery(video_id, segments)
+
+        ok_full, video_name, now_ts = self.upload_to_bigquery(video_id, segments)
+        mention_rows = self.extract_explicit_mentions(video_id, segments, video_name, now_ts)
+        ok_mentions = self.upload_mentions(mention_rows)
+        return ok_full and ok_mentions
 
     def run_once(self) -> Dict[str, int]:
         existing = self.get_existing_video_ids()
@@ -353,6 +405,7 @@ def run():
     _run_scrape_job()
     return {"status": "completed", "summary": _last_summary}
 
+
 # -------------------------------
 # CLI entrypoint
 # -------------------------------
@@ -368,3 +421,104 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+from fastapi import Query
+from google.cloud import bigquery as _bq
+
+@app.get("/search")
+def search_explicit_mentions(
+    q: str = Query(..., description="keyword/text to search for"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    client = _bq.Client(project=GCP_PROJECT_ID)
+    table = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_MENTIONS_TABLE}"
+
+    sql = f"""
+    SELECT video_id, segment_index, start_sec, end_sec, text, video_url, video_name, keyword, created_at
+    FROM `{table}`
+    WHERE LOWER(text) LIKE @pat OR LOWER(keyword) LIKE @kw
+    ORDER BY created_at DESC
+    LIMIT @limit
+    """
+
+    job_config = _bq.QueryJobConfig(
+        query_parameters=[
+            _bq.ScalarQueryParameter("pat", "STRING", f"%{q.lower()}%"),
+            _bq.ScalarQueryParameter("kw", "STRING", q.lower()),
+            _bq.ScalarQueryParameter("limit", "INT64", limit),
+        ]
+    )
+
+    rows = client.query(sql, job_config=job_config).result()
+
+    out = []
+    for r in rows:
+        ts_url = f"{r.video_url}&t={int(r.start_sec)}s"
+        out.append({
+            "video_id": r.video_id,
+            "segment_index": r.segment_index,
+            "start_sec": r.start_sec,
+            "end_sec": r.end_sec,
+            "text": r.text,
+            "keyword": r.keyword,
+            "video_name": r.video_name,
+            "timestamp_url": ts_url,
+            "created_at": str(r.created_at),
+        })
+    return {"q": q, "count": len(out), "results": out}
+
+from fastapi.responses import HTMLResponse
+
+@app.get("/ui", response_class=HTMLResponse)
+def ui():
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>UH Explicit Mentions Search</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; }
+    input { width: 360px; padding: 8px; }
+    button { padding: 8px 12px; margin-left: 6px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin: 10px 0; }
+    .meta { color: #666; font-size: 0.9em; margin-bottom: 6px; }
+    .text { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h2>UH Explicit Mentions</h2>
+  <p>Search explicit mention segments. Click timestamp to open YouTube.</p>
+
+  <input id="q" placeholder="e.g., board of regents, mauna kea, cancer center" />
+  <button onclick="runSearch()">Search</button>
+  <span id="status"></span>
+
+  <div id="results"></div>
+
+<script>
+async function runSearch(){
+  const q = document.getElementById("q").value.trim();
+  if(!q){ return; }
+  document.getElementById("status").textContent = " searching...";
+  const res = await fetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
+  const data = await res.json();
+  document.getElementById("status").textContent = ` ${data.count} results`;
+  const root = document.getElementById("results");
+  root.innerHTML = "";
+  for(const r of data.results){
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `
+      <div class="meta"><b>${r.video_name || r.video_id}</b></div>
+      <div class="meta">keyword: <code>${r.keyword}</code> • start: ${r.start_sec}s</div>
+      <div class="text">${r.text}</div>
+      <div><a href="${r.timestamp_url}" target="_blank">Open at timestamp</a></div>
+    `;
+    root.appendChild(div);
+  }
+}
+</script>
+</body>
+</html>
+"""

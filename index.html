@@ -2,119 +2,240 @@
 <html>
     <head>
         <meta charset="utf-8" />
-        <title>UH Explicit Mentions Search</title>
+        <title>UH Mentions Search v1.0</title>
         <style>
             body { font-family: system-ui, sans-serif; margin: 24px; }
+            body.modal-open { overflow: hidden; height: 100vh; }
             input { width: 360px; padding: 8px; }
             button { padding: 8px 12px; margin-left: 6px; }
             .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin: 10px 0; }
             .meta { color: #666; font-size: 0.9em; margin-bottom: 6px; }
             .text { white-space: pre-wrap; }
+            .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; align-items: center; justify-content: center; z-index: 2000; padding: 24px; }
+            .modal { background: white; border-radius: 10px; max-width: 1000px; width: 95%; max-height: 80vh; overflow: hidden; box-shadow: 0 12px 36px rgba(0,0,0,0.25); }
+            .modal-header { padding: 12px 16px; border-bottom: 1px solid #eee; display:flex; justify-content:space-between; align-items:center; }
+            .modal-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
+            .keywords-row { border: 1px solid #ddd; padding: 12px; white-space: normal; overflow-y: auto; max-height: 44vh; word-break: break-word; }
+            .keyword-suggest { display:flex; gap:8px; align-items:center; }
+            .keyword-suggest input[type="text"] { flex: 1 1 auto; padding: 8px; }
         </style>
     </head>
     <body>
-        <h2>UH Explicit Mentions</h2>
-        <p>Search explicit mention segments or browse videos</p>
+        <div id="page-content">
+            <h2>UH Mentions Search v1.0</h2>
+            <p>Browse videos or search explicit mention segments</p>
 
-        <!-- Tabs -->
-        <div style="margin-bottom: 12px;">
-            <button id="tab-videos-btn" onclick="showVideosTab()">Videos</button>
-            <button id="tab-mentions-btn" onclick="showMentionsTab()">Mentions</button>
-        </div>
+            <!-- Tabs -->
+            <div style="margin-bottom: 12px;">
+                <button id="tab-videos-btn" onclick="showVideosTab()">Videos</button>
+                <button id="tab-mentions-btn" onclick="showMentionsTab()">Mentions</button>
+                <button id="keywords-btn" onclick="openKeywordsModal()" title="Show keywords">Keywords</button>
+            </div>
 
-        <div style="margin-bottom: 12px;">
-            <input id="q_shared" placeholder="Search videos or mentions" style="width:420px;" />
-            <button onclick="doSearch()">Search</button>
-            <button onclick="clearSearch()">Clear</button>
-            <span id="status_videos" style="margin-left: 12px; display: inline-block;"></span>
-            <span id="status_mentions" style="margin-left: 12px; display: none;"></span>
-        </div>
+            <div style="margin-bottom: 12px;">
+                <input id="q_shared" placeholder="Search videos or mentions" style="width:420px;" />
+                <button onclick="doSearch()">Search</button>
+                <button onclick="clearSearch()">Clear</button>
+                <span id="status_videos" style="margin-left: 12px; display: inline-block;"></span>
+                <span id="status_mentions" style="margin-left: 12px; display: none;"></span>
+            </div>
 
-        <div id="videos-tab" style="display: none;">
-            <div id="videos-results"></div>
-        </div>
+            <div id="videos-tab" style="display: none;">
+                <div id="videos-results"></div>
+            </div>
 
-        <div id="mentions-tab">
-            <div id="results"></div>
-        </div>
+            <div id="mentions-tab">
+                <div id="results"></div>
+            </div>
 
-        <script>
-            async function runMentionSearch() {
-                const q = document.getElementById("q_shared").value.trim();
-                if (!q) { return; }
-                document.getElementById("status_mentions").textContent = " searching...";
-                const res = await fetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
-                const data = await res.json();
-                document.getElementById("status_mentions").textContent = ` ${data.count} results`;
-                const root = document.getElementById("results");
-                root.innerHTML = "";
-                for (const r of data.results) {
-                    const div = document.createElement("div");
-                    div.className = "card";
-                    div.innerHTML = `
-                        <div class="meta"><b>${r.video_name || r.video_id}</b></div>
-                        <div class="meta">keyword: <code>${r.keyword}</code> • start: ${r.start_sec}s</div>
-                        <div class="text">${r.text}</div>
-                        <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
-                    `;
-                    root.appendChild(div);
+            <script>
+                async function runMentionSearch() {
+                    const q = document.getElementById("q_shared").value.trim();
+                    if (!q) { return; }
+                    document.getElementById("status_mentions").textContent = " searching...";
+                    const res = await fetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
+                    const data = await res.json();
+                    document.getElementById("status_mentions").textContent = ` ${data.count} results`;
+                    const root = document.getElementById("results");
+                    root.innerHTML = "";
+                    for (const r of data.results) {
+                        const div = document.createElement("div");
+                        div.className = "card";
+                        div.innerHTML = `
+                            <div class="meta"><b>${r.video_name || r.video_id}</b></div>
+                            <div class="meta">keyword: <code>${r.keyword}</code> • start: ${r.start_sec}s</div>
+                            <div class="text">${r.text}</div>
+                            <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
+                        `;
+                        root.appendChild(div);
+                    }
                 }
-            }
 
-            let allVideos = [];
-            let allMentions = [];
+                let allVideos = [];
+                let allMentions = [];
 
-            function showVideosTab() {
-                document.getElementById('videos-tab').style.display = '';
-                document.getElementById('mentions-tab').style.display = 'none';
-                document.getElementById('tab-videos-btn').disabled = true;
-                document.getElementById('tab-mentions-btn').disabled = false;
-                const el = document.getElementById('q_shared');
-                if (el) { el.placeholder = 'Search videos by title'; }
-                const sv = document.getElementById('status_videos'); const sm = document.getElementById('status_mentions');
-                if (sv) sv.style.display = '';
-                if (sm) sm.style.display = 'none';
-                if (allVideos && allVideos.length > 0) {
+                function showVideosTab() {
+                    document.getElementById('videos-tab').style.display = '';
+                    document.getElementById('mentions-tab').style.display = 'none';
+                    document.getElementById('tab-videos-btn').disabled = true;
+                    document.getElementById('tab-mentions-btn').disabled = false;
+                    const el = document.getElementById('q_shared');
+                    if (el) { el.placeholder = 'Search videos by title'; }
+                    const sv = document.getElementById('status_videos'); const sm = document.getElementById('status_mentions');
+                    if (sv) sv.style.display = '';
+                    if (sm) sm.style.display = 'none';
+                    if (allVideos && allVideos.length > 0) {
+                        renderVideoResults(allVideos);
+                    } else {
+                        loadVideosAndCounts();
+                    }
+                }
+
+                function showMentionsTab() {
+                    document.getElementById('videos-tab').style.display = 'none';
+                    document.getElementById('mentions-tab').style.display = '';
+                    document.getElementById('tab-videos-btn').disabled = false;
+                    document.getElementById('tab-mentions-btn').disabled = true;
+                    const el = document.getElementById('q_shared');
+                    if (el) { el.placeholder = 'Search mentions (e.g., board of regents, mauna kea)'; }
+                    const sv = document.getElementById('status_videos'); const sm = document.getElementById('status_mentions');
+                    if (sv) sv.style.display = 'none';
+                    if (sm) sm.style.display = '';
+                    if (allMentions && allMentions.length > 0) {
+                        renderMentions(allMentions);
+                    } else {
+                        loadMentionsDefault();
+                    }
+                }
+
+                // Keywords modal
+                function openKeywordsModal() {
+                    const overlay = document.getElementById('keywords-modal-overlay');
+                    if (!overlay) return;
+                    overlay.style.display = 'flex';
+                    // prevent background scrolling and interactions
+                    try { document.body.classList.add('modal-open'); } catch (e) { /*ignore*/ }
+                    try { const page = document.getElementById('page-content'); if (page) page.setAttribute('aria-hidden', 'true'); } catch (e) {}
+                    // load keywords
+                    fetch('/keywords')
+                        .then(r => r.json())
+                        .then(data => {
+                            const list = (data && data.keywords) ? data.keywords : [];
+                            const el = document.getElementById('keywords-list');
+                            if (el) el.textContent = list.join(', ');
+                            const countEl = document.getElementById('keywords-count');
+                            if (countEl) countEl.textContent = `${list.length} keywords`;
+                            // trap focus in modal
+                            trapFocus(document.querySelector('#keywords-modal-overlay .modal'));
+                        })
+                        .catch(err => {
+                            console.error('Could not load keywords', err);
+                            const el = document.getElementById('keywords-list'); if (el) el.textContent = 'Error loading keywords';
+                            const countEl = document.getElementById('keywords-count'); if (countEl) countEl.textContent = '0 keywords';
+                        });
+                    // focus the suggestion input if present
+                    try { setTimeout(() => { const inp = document.getElementById('keyword-suggest-input'); if (inp) inp.focus(); }, 120); } catch (e) { /*ignore*/ }
+                }
+
+                function closeKeywordsModal() {
+                    const overlay = document.getElementById('keywords-modal-overlay');
+                    if (!overlay) return;
+                    overlay.style.display = 'none';
+                    try { document.body.classList.remove('modal-open'); } catch (e) { /*ignore*/ }
+                    try { const page = document.getElementById('page-content'); if (page) page.removeAttribute('aria-hidden'); } catch (e) {}
+                    releaseFocusTrap();
+                }
+
+                // Handle suggestion form submit (no backend) — just console.log the suggestion
+                function suggestKeyword(e) {
+                    try {
+                        e.preventDefault();
+                        const val = (document.getElementById('keyword-suggest-input') || {}).value || '';
+                        if (!val || !val.trim()) return;
+                        console.log('Keyword suggestion submitted:', val.trim());
+                        // Provide minimal UX: clear input and show a console-visible confirmation
+                        const inp = document.getElementById('keyword-suggest-input'); if (inp) inp.value = '';
+                        // Optionally flash a tiny message in modal (non-persistent)
+                        const countEl = document.getElementById('keywords-count');
+                        if (countEl) {
+                            const prev = countEl.textContent;
+                            countEl.textContent = 'Thanks — suggestion logged';
+                            setTimeout(() => { countEl.textContent = prev; }, 1400);
+                        }
+                    } catch (err) {
+                        console.error('suggestKeyword error', err);
+                    }
+                }
+
+                // Simple focus trap implementation scoped to the modal element.
+                let _focusTrapHandler = null;
+                function trapFocus(modalEl) {
+                    try {
+                        if (!modalEl) return;
+                        const focusable = Array.from(modalEl.querySelectorAll('a,button,input,textarea,select,[tabindex]:not([tabindex="-1"])')).filter(el => !el.hasAttribute('disabled'));
+                        if (!focusable.length) return;
+                        let idx = 0;
+                        focusable[0].focus();
+                        _focusTrapHandler = function (ev) {
+                            if (ev.key !== 'Tab') return;
+                            ev.preventDefault();
+                            if (ev.shiftKey) idx = (idx - 1 + focusable.length) % focusable.length;
+                            else idx = (idx + 1) % focusable.length;
+                            focusable[idx].focus();
+                        };
+                        document.addEventListener('keydown', _focusTrapHandler);
+                    } catch (e) { console.warn('trapFocus error', e); }
+                }
+
+                function releaseFocusTrap() {
+                    try {
+                        if (_focusTrapHandler) {
+                            document.removeEventListener('keydown', _focusTrapHandler);
+                            _focusTrapHandler = null;
+                        }
+                    } catch (e) { /*ignore*/ }
+                }
+
+                async function loadVideosAndCounts() {
+                    const resp = await fetch(`/list-videos?limit=100`);
+                    const vids = await resp.json();
+                    allVideos = vids.results || [];
                     renderVideoResults(allVideos);
-                } else {
-                    loadVideosAndCounts();
                 }
-            }
 
-            function showMentionsTab() {
-                document.getElementById('videos-tab').style.display = 'none';
-                document.getElementById('mentions-tab').style.display = '';
-                document.getElementById('tab-videos-btn').disabled = false;
-                document.getElementById('tab-mentions-btn').disabled = true;
-                const el = document.getElementById('q_shared');
-                if (el) { el.placeholder = 'Search mentions (e.g., board of regents, mauna kea)'; }
-                const sv = document.getElementById('status_videos'); const sm = document.getElementById('status_mentions');
-                if (sv) sv.style.display = 'none';
-                if (sm) sm.style.display = '';
-                if (allMentions && allMentions.length > 0) {
-                    renderMentions(allMentions);
-                } else {
-                    loadMentionsDefault();
+                async function loadMentionsDefault() {
+                    const st = document.getElementById('status_mentions'); if (st) st.textContent = '';
+                    try {
+                        const resp = await fetch(`/list_mentions?limit=100`);
+                        const data = await resp.json();
+                        const root = document.getElementById('results');
+                        root.innerHTML = '';
+                        const items = data.results || [];
+                        // cache for instant rendering when switching tabs or clearing
+                        allMentions = items.slice();
+                        for (const r of items) {
+                            const div = document.createElement('div');
+                            div.className = 'card';
+                            const ts_url = r.timestamp_url || ((r.video_url && typeof r.start_sec !== 'undefined') ? `${r.video_url}&t=${Math.floor(r.start_sec)}s` : (r.video_url || '#'));
+                            div.innerHTML = `
+                                <div class="meta"><b>${r.video_name || r.video_id}</b></div>
+                                <div class="meta">keyword: <code>${r.keyword || ''}</code> • start: ${r.start_sec || ''}s</div>
+                                <div class="text">${r.text || ''}</div>
+                                <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
+                            `;
+                            root.appendChild(div);
+                        }
+                        if (st) st.textContent = ` ${items.length} results`;
+                    } catch (err) {
+                        if (st) st.textContent = ' error loading mentions';
+                        console.error('loadMentionsDefault error', err);
+                    }
                 }
-            }
 
-            async function loadVideosAndCounts() {
-                const resp = await fetch(`/list-videos?limit=100`);
-                const vids = await resp.json();
-                allVideos = vids.results || [];
-                renderVideoResults(allVideos);
-            }
-
-            async function loadMentionsDefault() {
-                const st = document.getElementById('status_mentions'); if (st) st.textContent = ''; 
-                try {
-                    const resp = await fetch(`/list_mentions?limit=100`);
-                    const data = await resp.json();
+                // Render a list of mention objects
+                function renderMentions(items) {
                     const root = document.getElementById('results');
                     root.innerHTML = '';
-                    const items = data.results || [];
-                    // cache for instant rendering when switching tabs or clearing
-                    allMentions = items.slice();
                     for (const r of items) {
                         const div = document.createElement('div');
                         div.className = 'card';
@@ -127,97 +248,92 @@
                         `;
                         root.appendChild(div);
                     }
-                    if (st) st.textContent = ` ${items.length} results`;
-                } catch (err) {
-                    if (st) st.textContent = ' error loading mentions';
-                    console.error('loadMentionsDefault error', err);
+                    const st = document.getElementById('status_mentions'); if (st) st.textContent = ` ${items.length} results`;
                 }
-            }
 
-            // Render a list of mention objects
-            function renderMentions(items) {
-                const root = document.getElementById('results');
-                root.innerHTML = '';
-                for (const r of items) {
-                    const div = document.createElement('div');
-                    div.className = 'card';
-                    const ts_url = r.timestamp_url || ((r.video_url && typeof r.start_sec !== 'undefined') ? `${r.video_url}&t=${Math.floor(r.start_sec)}s` : (r.video_url || '#'));
-                    div.innerHTML = `
-                        <div class="meta"><b>${r.video_name || r.video_id}</b></div>
-                        <div class="meta">keyword: <code>${r.keyword || ''}</code> • start: ${r.start_sec || ''}s</div>
-                        <div class="text">${r.text || ''}</div>
-                        <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
-                    `;
-                    root.appendChild(div);
-                }
-                const st = document.getElementById('status_mentions'); if (st) st.textContent = ` ${items.length} results`;
-            }
-
-            function renderVideoResults(videos) {
-                const root = document.getElementById('videos-results');
-                root.innerHTML = '';
-                for (const v of videos) {
-                    const div = document.createElement('div');
-                    div.className = 'card';
-                    const title = v.video_name || v.video_id;
-                    div.innerHTML = `
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <div>
-                                <div class="meta"><b>${title} || ${v.video_id}</b></div>
-                                <div class="meta">mentions: ${v.mention_count ?? 0}</div>
+                function renderVideoResults(videos) {
+                    const root = document.getElementById('videos-results');
+                    root.innerHTML = '';
+                    for (const v of videos) {
+                        const div = document.createElement('div');
+                        div.className = 'card';
+                        const title = v.video_name || v.video_id;
+                        div.innerHTML = `
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <div>
+                                    <div class="meta"><b>${title} || ${v.video_id}</b></div>
+                                    <div class="meta">mentions: ${v.mention_count ?? 0}</div>
+                                </div>
+                                <div style="display:flex;gap:8px;align-items:center;">
+                                    <a href="${v.video_url}" target="_blank" title="Open video" style="font-size:1.1em;text-decoration:none;">↗</a>
+                                </div>
                             </div>
-                            <div style="display:flex;gap:8px;align-items:center;">
-                                <a href="${v.video_url}" target="_blank" title="Open video" style="font-size:1.1em;text-decoration:none;">↗</a>
-                            </div>
-                        </div>
-                        <div style="margin-top:8px;"><a href="/video/${v.video_id}/view" target="_blank">View More</a></div>
-                    `;
-                    root.appendChild(div);
+                            <div style="margin-top:8px;"><a href="/video/${v.video_id}/view" target="_blank">View More</a></div>
+                        `;
+                        root.appendChild(div);
+                    }
+                    const sv = document.getElementById('status_videos'); if (sv) sv.textContent = ` ${videos.length} videos`;
                 }
-                const sv = document.getElementById('status_videos'); if (sv) sv.textContent = ` ${videos.length} videos`;
-            }
 
-            function runVideoSearch() {
-                const q = document.getElementById('q_shared').value.trim().toLowerCase();
-                if (!q) {
-                    renderVideoResults(allVideos);
-                    return;
+                function runVideoSearch() {
+                    const q = document.getElementById('q_shared').value.trim().toLowerCase();
+                    if (!q) {
+                        renderVideoResults(allVideos);
+                        return;
+                    }
+                    const filtered = allVideos.filter(v => (v.video_name || '').toLowerCase().includes(q) || (v.video_id || '').toLowerCase().includes(q));
+                    renderVideoResults(filtered);
+                    const sv = document.getElementById('status_videos'); if (sv) sv.textContent = ` ${filtered.length} videos`;
                 }
-                const filtered = allVideos.filter(v => (v.video_name || '').toLowerCase().includes(q) || (v.video_id || '').toLowerCase().includes(q));
-                renderVideoResults(filtered);
-                const sv = document.getElementById('status_videos'); if (sv) sv.textContent = ` ${filtered.length} videos`;
-            }
 
-            function doSearch() {
-                // Call the appropriate search based on active tab
-                const videosVisible = document.getElementById('videos-tab').style.display !== 'none';
-                if (videosVisible) {
-                    runVideoSearch();
-                } else {
-                    runMentionSearch();
-                }
-            }
-
-            function clearSearch() {
-                const el = document.getElementById('q_shared');
-                if (el) { el.value = ''; }
-                // reset results depending on tab
-                const videosVisible = document.getElementById('videos-tab').style.display !== 'none';
-                if (videosVisible) { renderVideoResults(allVideos); }
-                else {
-                    // restore the cached full mentions list (or reload if empty)
-                    if (allMentions && allMentions.length > 0) {
-                        renderMentions(allMentions);
+                function doSearch() {
+                    // Call the appropriate search based on active tab
+                    const videosVisible = document.getElementById('videos-tab').style.display !== 'none';
+                    if (videosVisible) {
+                        runVideoSearch();
                     } else {
-                        loadMentionsDefault();
+                        runMentionSearch();
                     }
                 }
-            }
 
-            // initialize
-            showVideosTab();
-            loadVideosAndCounts();
-            loadMentionsDefault();
-        </script>
+                function clearSearch() {
+                    const el = document.getElementById('q_shared');
+                    if (el) { el.value = ''; }
+                    // reset results depending on tab
+                    const videosVisible = document.getElementById('videos-tab').style.display !== 'none';
+                    if (videosVisible) { renderVideoResults(allVideos); }
+                    else {
+                        // restore the cached full mentions list (or reload if empty)
+                        if (allMentions && allMentions.length > 0) {
+                            renderMentions(allMentions);
+                        } else {
+                            loadMentionsDefault();
+                        }
+                    }
+                }
+
+                // initialize
+                showVideosTab();
+                loadVideosAndCounts();
+                loadMentionsDefault();
+            </script>
+        </div> <!-- /#page-content -->
+
+        <!-- Keywords modal overlay -->
+        <div id="keywords-modal-overlay" class="modal-overlay">
+            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="keywords-title">
+                <div class="modal-header">
+                    <div id="keywords-count">0 keywords</div>
+                    <div><button onclick="closeKeywordsModal()">Close</button></div>
+                </div>
+                <div class="modal-body">
+                    <div class="keywords-row" id="keywords-list">(loading...)</div>
+                    <form id="keyword-suggest-form" class="keyword-suggest" onsubmit="suggestKeyword(event)">
+                        <input id="keyword-suggest-input" type="text" placeholder="Suggest a keyword" aria-label="Suggest a keyword" />
+                        <button type="submit">Submit</button>
+                    </form>
+                </div>
+            </div>
+        </div>
     </body>
 </html>

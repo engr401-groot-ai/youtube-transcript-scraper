@@ -97,20 +97,29 @@ def _load_explicit_keywords_from_sheet(sheet_id: str, value_range: str = "A:A") 
     """
     if not sheet_id:
         return []
+
+    # Use ADC to call Sheets API once and return results (no retries, no fallback)
     try:
         creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
-        logger.info("Using application default credentials for Sheets API")
+        logger.info("Using application default credentials for Sheets API (explicit keywords)")
         service = build("sheets", "v4", credentials=creds)
         resp = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=value_range).execute()
         values = resp.get("values", []) or []
+
+        # Log that the sheet range was successfully opened and how many rows were returned
+        try:
+            logger.info(f"Opened sheet {sheet_id} range {value_range} — {len(values)} rows")
+        except Exception:
+            # Avoid any unexpected logging errors from breaking keyword loading
+            logger.info(f"Opened sheet {sheet_id} range {value_range}")
 
         kws: List[str] = []
         for i, row in enumerate(values):
             if not row:
                 continue
             cell = str(row[0]).strip()
+            # Skip header-like first row
             if i == 0 and cell.lower() in ("term", "keyword", "keywords"):
-                # assume header row, skip
                 continue
             if cell:
                 kws.append(cell.lower())
@@ -345,13 +354,22 @@ class YouTubeTranscriptScraper:
         video_name: str,
         now_timestamp: str,
     ) -> List[Dict[str, Any]]:
-        if not EXPLICIT_KEYWORDS:
+        if not EXPLICIT_SHEET_ID:
             return []
+
+        value_range = EXPLICIT_SHEET_RANGE
+        if EXPLICIT_SHEET_TAB:
+            value_range = f"{EXPLICIT_SHEET_TAB}!{EXPLICIT_SHEET_RANGE}"
+
+        keywords = _load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
+        if not keywords:
+            return []
+
         rows: List[Dict[str, Any]] = []
 
         # Use regex whole-word matching to avoid substring false positives.
         # For each keyword build a pattern like r"\bkeyword\b" (escaped).
-        patterns = [(kw, re.compile(r"\b" + re.escape(kw) + r"\b", flags=re.IGNORECASE)) for kw in EXPLICIT_KEYWORDS if kw]
+        patterns = [(kw, re.compile(r"\b" + re.escape(kw) + r"\b", flags=re.IGNORECASE)) for kw in keywords if kw]
 
         for idx, seg in enumerate(segments):
             text = seg.get("text", "") or ""
@@ -749,6 +767,22 @@ def list_mentions(
         })
 
     return {"count": len(out), "results": out}
+
+
+@app.get("/keywords")
+def keywords():
+    """Return explicit keywords from the configured Google Sheet.
+    It returns a JSON array of lowercased keywords (deduplicated, order-preserving).
+    """
+    if not EXPLICIT_SHEET_ID:
+        return {"count": 0, "keywords": []}
+
+    value_range = EXPLICIT_SHEET_RANGE
+    if EXPLICIT_SHEET_TAB:
+        value_range = f"{EXPLICIT_SHEET_TAB}!{EXPLICIT_SHEET_RANGE}"
+
+    kws = _load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
+    return {"count": len(kws), "keywords": kws}
 
 # -------------------------------
 # CLI entrypoint

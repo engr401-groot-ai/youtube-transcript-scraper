@@ -56,13 +56,15 @@ app = FastAPI(title="UH YouTube Transcript Scraper (Apify)", version="0.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://youtube-transcript-scraper.lovable.app",  # published Lovable site
         "https://lovable.dev",
     ],
-    allow_origin_regex=r"https://.*\.lovableproject\.com",
+    allow_origin_regex=r"https://.*\.lovableproject\.com",  # preview subdomains
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 def load_environment_variables() -> None:

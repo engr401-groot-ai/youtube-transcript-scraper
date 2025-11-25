@@ -463,7 +463,7 @@ class YouTubeTranscriptScraper:
 
 def trigger_notification_job():
     """
-    Trigger the Cloud Run Job named `notifier-job` in `CLOUD_RUN_REGION`.
+    Trigger the Cloud Run Job named `notification-system-job` in `CLOUD_RUN_REGION`.
     This uses the Cloud Run Admin client (run_v2). The function logs errors
     but does not raise so it won't crash the scraper on notification failures.
     """
@@ -472,7 +472,7 @@ def trigger_notification_job():
         return
 
     location = CLOUD_RUN_REGION
-    job_name = f"projects/{GCP_PROJECT_ID}/locations/{location}/jobs/notifier-job"
+    job_name = f"projects/{GCP_PROJECT_ID}/locations/{location}/jobs/notification-system-job"
 
     try:
         client = run_v2.JobsClient()

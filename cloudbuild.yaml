@@ -4,9 +4,9 @@ steps:
     args:
       - "build"
       - "-t"
-      - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/uh-collector:latest"
+      - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/youtube-transcript-scraper:latest"
       - "-t"
-      - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/uh-collector:$BUILD_ID"
+      - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/youtube-transcript-scraper:$BUILD_ID"
       - "."
 
   # 2. Push the images to Artifact Registry
@@ -14,11 +14,11 @@ steps:
     args:
       - "push"
       - "--all-tags"
-      - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/uh-collector"
+      - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/youtube-transcript-scraper"
 
 options:
   logging: CLOUD_LOGGING_ONLY
 
 images:
-  - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/uh-collector:latest"
-  - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/uh-collector:$BUILD_ID"
+  - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/youtube-transcript-scraper:latest"
+  - "us-west1-docker.pkg.dev/$PROJECT_ID/youtube-transcript-scraper-repo/youtube-transcript-scraper:$BUILD_ID"

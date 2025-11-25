@@ -108,6 +108,7 @@ APIFY_LANGUAGE = os.getenv("APIFY_LANGUAGE", "en")
 CLOUD_RUN_REGION = os.getenv("CLOUD_RUN_REGION", "us-central1")
 
 MAX_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_VIDEOS_PER_CHANNEL", "10"))
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "30"))
 
 def _load_explicit_keywords_from_sheet(sheet_id: str, value_range: str = "A:A") -> List[str]:
     """Load keywords from a Google Sheet (first column). Returns list of lowercase keywords.
@@ -173,12 +174,6 @@ else:
     logger.info("No EXPLICIT_SHEET_ID configured — explicit mention extraction disabled.")
     EXPLICIT_KEYWORDS = []
 
-APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
-APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "starvibe/youtube-video-transcript")
-APIFY_LANGUAGE = os.getenv("APIFY_LANGUAGE", "en")
-
-MAX_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_VIDEOS_PER_CHANNEL", "10"))
-
 CHANNELS = [
     {"name": "Hawaii Senate", "channel_id": "UCekvvdL_uyq2DUyj1GjlrOA"},
     {"name": "Hawaii House of Representatives", "channel_id": "UCvoLAX1ww3e63K8qQ5of0bw"},
@@ -204,7 +199,7 @@ def validate_configuration() -> None:
 class YouTubeTranscriptScraper:
     def __init__(self):
         validate_configuration()
-        self.youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+        self.youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY, cache_discovery=False)
         self.bq_client = self._init_bigquery_client()
         self.table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_HEARING_VIDEOS_TABLE}"
         self.mentions_table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_MENTIONS_TABLE}"
@@ -229,46 +224,91 @@ class YouTubeTranscriptScraper:
             return set()
 
     def get_channel_videos(self, channel_id: str, channel_name: str) -> List[str]:
-        video_ids: List[str] = []
         try:
-            logger.info(f"Fetching completed live streams from {channel_name}...")
-            req = self.youtube.search().list(
-                part="id",
-                channelId=channel_id,
-                eventType="completed",
-                type="video",
-                order="date",
-                maxResults=min(MAX_VIDEOS_PER_CHANNEL, 50),
+            logger.info(f"Fetching videos from {channel_name} via Uploads playlist...")
+            
+            # 1. Get Uploads Playlist ID
+            ch_resp = self.youtube.channels().list(
+                id=channel_id,
+                part="contentDetails"
+            ).execute()
+            
+            items = ch_resp.get("items", [])
+            if not items:
+                logger.warning(f"Channel {channel_name} ({channel_id}) not found")
+                return []
+                
+            uploads_playlist_id = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+            
+            # 2. Fetch recent items from playlist (50)
+            pl_req = self.youtube.playlistItems().list(
+                part="contentDetails",
+                playlistId=uploads_playlist_id,
+                maxResults=50
             )
-            resp = req.execute()
+            pl_resp = pl_req.execute()
+            
+            pl_items = pl_resp.get("items", [])
+            if not pl_items:
+                logger.info(f"No videos found in uploads playlist for {channel_name}")
+                return []
+                
+            video_ids = [item["contentDetails"]["videoId"] for item in pl_items]
+            
+            # 3. Fetch video details to filter by status and date
+            # We need 'snippet' for liveBroadcastContent and 'liveStreamingDetails' for actual dates
+            vid_req = self.youtube.videos().list(
+                part="snippet,liveStreamingDetails",
+                id=",".join(video_ids)
+            )
+            vid_resp = vid_req.execute()
+            
+            valid_videos = []
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+            
+            for item in vid_resp.get("items", []):
+                vid = item["id"]
+                snippet = item["snippet"]
+                live_details = item.get("liveStreamingDetails", {})
+                
+                # Check broadcast status
+                broadcast_content = snippet.get("liveBroadcastContent", "none")
+                if broadcast_content in ("upcoming", "live"):
+                    logger.debug(f"Skipping {broadcast_content} video: {vid}")
+                    continue
+                    
+                # Determine date: prefer actualEndTime, then actualStartTime, then publishedAt
+                date_str = live_details.get("actualEndTime") or live_details.get("actualStartTime") or snippet["publishedAt"]
+                
+                try:
+                    # Handle Z or +00:00
+                    if date_str.endswith("Z"):
+                        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                    else:
+                        dt = datetime.fromisoformat(date_str)
+                except ValueError:
+                     # Fallback
+                    dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                
+                if dt >= cutoff_date:
+                    valid_videos.append({"id": vid, "date": dt})
+                else:
+                    # logger.debug(f"Skipping old video {vid} ({dt})")
+                    pass
 
-            for item in resp.get("items", []):
-                if item["id"]["kind"] == "youtube#video":
-                    video_ids.append(item["id"]["videoId"])
-
-            while "nextPageToken" in resp and len(video_ids) < MAX_VIDEOS_PER_CHANNEL:
-                req = self.youtube.search().list(
-                    part="id",
-                    channelId=channel_id,
-                    eventType="completed",
-                    type="video",
-                    order="date",
-                    maxResults=min(MAX_VIDEOS_PER_CHANNEL - len(video_ids), 50),
-                    pageToken=resp["nextPageToken"],
-                )
-                resp = req.execute()
-
-                for item in resp.get("items", []):
-                    if item["id"]["kind"] == "youtube#video":
-                        video_ids.append(item["id"]["videoId"])
+            # Sort by date descending
+            valid_videos.sort(key=lambda x: x["date"], reverse=True)
+            
+            final_ids = [v["id"] for v in valid_videos[:MAX_VIDEOS_PER_CHANNEL]]
+            logger.info(f"Found {len(final_ids)} completed recent videos (last {LOOKBACK_DAYS} days) for {channel_name}")
+            return final_ids
 
         except HttpError as e:
             logger.error(f"YouTube API error for {channel_name}: {e}")
+            return []
         except Exception as e:
             logger.error(f"Unexpected error for {channel_name}: {e}")
-
-        logger.info(f"Found {len(video_ids)} videos for {channel_name}")
-        return video_ids
+            return []
 
     # -------- Apify transcript extraction & upload --------
     def get_transcript_apify(self, video_id: str) -> List[Dict[str, Any]]:

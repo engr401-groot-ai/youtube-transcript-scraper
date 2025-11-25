@@ -48,16 +48,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("scraper")
 
-app = FastAPI(title="UH YouTube Transcript Scraper (Apify)", version="0.4.0")
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI(title="UH YouTube Transcript Scraper (Apify)", version="0.4.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[
+        "https://lovable.dev",
+    ],
+    allow_origin_regex=r"https://.*\.lovableproject\.com",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 def load_environment_variables() -> None:
     """Load environment variables from Secret Manager (Cloud Run) or .env (local)."""

@@ -28,13 +28,12 @@ import threading
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Set, Optional, Any
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, Response
 import html as html_escape
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.cloud import bigquery, secretmanager
-from google.cloud import run_v2
 import google.auth
 from apify_client import ApifyClient
 
@@ -105,7 +104,6 @@ EXPLICIT_SHEET_RANGE = os.getenv("EXPLICIT_SHEET_RANGE", "")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
 APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "starvibe/youtube-video-transcript")
 APIFY_LANGUAGE = os.getenv("APIFY_LANGUAGE", "en")
-CLOUD_RUN_REGION = os.getenv("CLOUD_RUN_REGION", "us-central1")
 
 MAX_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_VIDEOS_PER_CHANNEL", "10"))
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "30"))
@@ -501,28 +499,6 @@ class YouTubeTranscriptScraper:
 
         return {"processed": processed, "skipped": skipped, "failed": failed}
 
-def trigger_notification_job():
-    """
-    Trigger the Cloud Run Job named `notification-system-job` in `CLOUD_RUN_REGION`.
-    This uses the Cloud Run Admin client (run_v2). The function logs errors
-    but does not raise so it won't crash the scraper on notification failures.
-    """
-    if not GCP_PROJECT_ID:
-        logger.warning("GCP_PROJECT_ID not configured; cannot trigger notifier job")
-        return
-
-    location = CLOUD_RUN_REGION
-    job_name = f"projects/{GCP_PROJECT_ID}/locations/{location}/jobs/notification-system-job"
-
-    try:
-        client = run_v2.JobsClient()
-        request = run_v2.RunJobRequest(name=job_name)
-        client.run_job(request=request)
-        logger.info(f"Successfully triggered notification job: {job_name}")
-    except Exception as e:
-        logger.error(f"Failed to trigger notification job {job_name}: {e}")
-        return
-
 # -------------------------------
 # Service wrapper state
 # -------------------------------
@@ -544,15 +520,6 @@ def _run_scrape_job():
         summary = scraper.run_once()
         _last_summary = summary
         logger.info(f"Scrape summary: {summary}")
-
-        try:
-            if isinstance(summary, dict) and summary.get("processed", 0) > 0:
-                logger.info("New videos found! Triggering the notification job...")
-                trigger_notification_job()
-            else:
-                logger.info("No new videos. Skipping notification job trigger.")
-        except Exception as e:
-            logger.warning(f"Error while attempting to trigger notification job: {e}")
 
     except Exception as e:
         logger.error(f"Scrape fatal error: {e}", exc_info=True)
@@ -901,6 +868,135 @@ def get_recent_mentions(
         })
 
     return {"count": len(results), "results": results}
+
+@app.get("/api/notification-settings")
+def get_notification_settings():
+    """
+    Fetch current notification settings from Secret Manager.
+    Returns only SMTP_USER, SMTP_PASSWORD, and TO_EMAILS.
+    """
+    project_id = os.getenv("GCP_PROJECT_ID", "its-gro")
+    secret_name = f"projects/{project_id}/secrets/notification-system-env/versions/latest"
+    
+    try:
+        client = secretmanager.SecretManagerServiceClient()
+        response = client.access_secret_version(request={"name": secret_name})
+        payload = response.payload.data.decode("utf-8")
+        
+        settings = {}
+        for line in payload.strip().splitlines():
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            key = k.strip()
+            value = v.strip()
+            
+            # Only expose these three fields
+            if key == "SMTP_USER":
+                settings["SMTP_USER"] = value
+            elif key == "SMTP_PASSWORD":
+                settings["SMTP_PASSWORD"] = value  # Return actual password for pre-population
+            elif key == "TO_EMAILS":
+                settings["TO_EMAILS"] = value
+        
+        return {"ok": True, "settings": settings}
+    
+    except Exception as e:
+        logger.error(f"Failed to fetch notification settings: {e}")
+        return {"ok": False, "error": str(e)}
+
+@app.post("/api/notification-settings")
+async def update_notification_settings(request: Request, dry_run: bool = Query(False)):
+    """
+    Update notification settings by creating a new version in Secret Manager.
+    Only updates SMTP_USER, SMTP_PASSWORD, and TO_EMAILS.
+    All other settings are preserved from the current version.
+    
+    Expected request body:
+    {
+        "SMTP_USER": "email@example.com",
+        "SMTP_PASSWORD": "app_password",
+        "TO_EMAILS": "email1@example.com,email2@example.com"
+    }
+    """
+    project_id = os.getenv("GCP_PROJECT_ID", "its-gro")
+    secret_id = "notification-system-env"
+    secret_name = f"projects/{project_id}/secrets/{secret_id}"
+    
+    try:
+        # Get current settings first
+        client = secretmanager.SecretManagerServiceClient()
+        current_version = client.access_secret_version(
+            request={"name": f"{secret_name}/versions/latest"}
+        )
+        current_payload = current_version.payload.data.decode("utf-8")
+        
+        # Parse current settings
+        current_settings = {}
+        for line in current_payload.strip().splitlines():
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            current_settings[k.strip()] = v.strip()
+        
+        # Update only the three allowed fields
+        body = await request.json()
+        allowed_fields = ["SMTP_USER", "SMTP_PASSWORD", "TO_EMAILS"]
+        
+        for key in allowed_fields:
+            if key in body and body[key] is not None:
+                val = body[key].strip()
+                
+                # Validation logic
+                if key == "TO_EMAILS":
+                    # "comma seperation with no spaces"
+                    if " " in val:
+                        return {"ok": False, "error": "Recipients must be comma-separated with NO spaces."}
+                    # Optional: validate each part is an email-like string
+                    parts = val.split(",")
+                    for p in parts:
+                        if "@" not in p:
+                            return {"ok": False, "error": f"Invalid email in recipients: {p}"}
+                            
+                elif key == "SMTP_USER":
+                    # "singular and correct email"
+                    # Simple regex for email: something@something.something
+                    if not re.match(r"[^@\s]+@[^@\s]+\.[^@\s]+", val) or "," in val:
+                        return {"ok": False, "error": "Sender must be a single valid email address (e.g. user@example.com)."}
+                        
+                elif key == "SMTP_PASSWORD":
+                    # "single string, no whitespaces"
+                    if any(c.isspace() for c in val):
+                        return {"ok": False, "error": "App Password must not contain whitespaces."}
+
+                current_settings[key] = val
+        
+        # Build new secret payload
+        new_payload = "\n".join([f"{k}={v}" for k, v in current_settings.items()])
+        
+        if dry_run:
+            logger.info(f"Dry run: would save payload length {len(new_payload)}")
+            return {
+                "ok": True, 
+                "message": "Dry run successful. Validation passed.", 
+                "would_save": current_settings
+            }
+
+        # Add new version to the secret
+        parent = client.secret_path(project_id, secret_id)
+        response = client.add_secret_version(
+            request={
+                "parent": parent,
+                "payload": {"data": new_payload.encode("utf-8")},
+            }
+        )
+        
+        logger.info(f"Created new secret version: {response.name}")
+        return {"ok": True, "message": "Settings updated successfully", "version": response.name}
+    
+    except Exception as e:
+        logger.error(f"Failed to update notification settings: {e}")
+        return {"ok": False, "error": str(e)}
 
 @app.get("/keywords")
 def keywords():

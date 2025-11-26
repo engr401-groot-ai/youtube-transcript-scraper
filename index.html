@@ -30,6 +30,7 @@
                 <button id="tab-videos-btn" onclick="showVideosTab()">Videos</button>
                 <button id="tab-mentions-btn" onclick="showMentionsTab()">Mentions</button>
                 <button id="keywords-btn" onclick="openKeywordsModal()" title="Show keywords">Keywords</button>
+                <button id="settings-btn" onclick="openSettingsModal()" title="Notification Settings">Settings</button>
             </div>
 
             <div style="margin-bottom: 12px;">
@@ -312,6 +313,89 @@
                     }
                 }
 
+                async function openSettingsModal() {
+                    const overlay = document.getElementById('settings-modal-overlay');
+                    if (!overlay) return;
+                    overlay.style.display = 'flex';
+                    try { document.body.classList.add('modal-open'); } catch (e) { /*ignore*/ }
+                    try { const page = document.getElementById('page-content'); if (page) page.setAttribute('aria-hidden', 'true'); } catch (e) {}
+                    
+                    // Load current settings
+                    try {
+                        const resp = await fetch('/api/notification-settings');
+                        const data = await resp.json();
+                        if (data.ok && data.settings) {
+                            document.getElementById('smtp-user').value = data.settings.SMTP_USER || '';
+                            document.getElementById('smtp-password').value = data.settings.SMTP_PASSWORD || '';
+                            document.getElementById('to-emails').value = data.settings.TO_EMAILS || '';
+                        }
+                    } catch (err) {
+                        console.error('Failed to load settings:', err);
+                        alert('Failed to load current settings');
+                    }
+                    
+                    trapFocus(document.querySelector('#settings-modal-overlay .modal'));
+                }
+                
+                function closeSettingsModal() {
+                    const overlay = document.getElementById('settings-modal-overlay');
+                    if (!overlay) return;
+                    overlay.style.display = 'none';
+                    try { document.body.classList.remove('modal-open'); } catch (e) { /*ignore*/ }
+                    try { const page = document.getElementById('page-content'); if (page) page.removeAttribute('aria-hidden'); } catch (e) {}
+                    releaseFocusTrap();
+                }
+                
+                async function saveSettings(e) {
+                    e.preventDefault();
+                    
+                    const settings = {
+                        SMTP_USER: document.getElementById('smtp-user').value.trim(),
+                        SMTP_PASSWORD: document.getElementById('smtp-password').value.trim(),
+                        TO_EMAILS: document.getElementById('to-emails').value.trim(),
+                    };
+
+                    const statusEl = document.getElementById('settings-status');
+
+                    // Client-side validation
+                    if (settings.TO_EMAILS.includes(' ')) {
+                        if (statusEl) statusEl.textContent = '✗ Error: Recipients must be comma-separated with NO spaces.';
+                        return;
+                    }
+                    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.SMTP_USER)) {
+                        if (statusEl) statusEl.textContent = '✗ Error: Sender must be a valid email address (e.g. user@example.com).';
+                        return;
+                    }
+                    if (/\s/.test(settings.SMTP_PASSWORD)) {
+                        if (statusEl) statusEl.textContent = '✗ Error: App Password must not contain whitespaces.';
+                        return;
+                    }
+                    
+                    if (statusEl) statusEl.textContent = 'Saving...';
+                    
+                    try {
+                        const resp = await fetch('/api/notification-settings', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(settings)
+                        });
+                        
+                        const data = await resp.json();
+                        if (data.ok) {
+                            if (statusEl) statusEl.textContent = '✓ Settings saved successfully!';
+                            setTimeout(() => {
+                                if (statusEl) statusEl.textContent = '';
+                                closeSettingsModal();
+                            }, 1500);
+                        } else {
+                            if (statusEl) statusEl.textContent = '✗ Error: ' + (data.error || 'Unknown error');
+                        }
+                    } catch (err) {
+                        console.error('Failed to save settings:', err);
+                        if (statusEl) statusEl.textContent = '✗ Failed to save settings';
+                    }
+                }
+
                 // initialize
                 showVideosTab();
                 loadVideosAndCounts();
@@ -331,6 +415,42 @@
                     <form id="keyword-suggest-form" class="keyword-suggest" onsubmit="suggestKeyword(event)">
                         <input id="keyword-suggest-input" type="text" placeholder="Suggest a keyword" aria-label="Suggest a keyword" />
                         <button type="submit">Submit</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Settings modal overlay -->
+        <div id="settings-modal-overlay" class="modal-overlay">
+            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+                <div class="modal-header">
+                    <h3 id="settings-title" style="margin:0;">Notification Settings</h3>
+                    <button onclick="closeSettingsModal()">Close</button>
+                </div>
+                <div class="modal-body" style="max-height: 60vh; overflow-y: auto;">
+                    <form id="settings-form" onsubmit="saveSettings(event)">
+                        <div style="margin-bottom: 12px;">
+                            <label for="to-emails" style="display: block; font-weight: bold; margin-bottom: 4px;">Recipients</label>
+                            <input id="to-emails" type="text" required style="width: 100%; padding: 8px;" placeholder="email1@example.com,email2@example.com" />
+                            <div style="font-size: 0.85em; color: #666; margin-top: 4px;">Note: comma seperated (e.g. email@example.com,email@example.com)</div>
+                        </div>
+                        
+                        <div style="margin-bottom: 12px;">
+                            <label for="smtp-user" style="display: block; font-weight: bold; margin-bottom: 4px;">Sender</label>
+                            <input id="smtp-user" type="email" required style="width: 100%; padding: 8px;" placeholder="your-email@example.com" />
+                        </div>
+                        
+                        <div style="margin-bottom: 12px;">
+                            <label for="smtp-password" style="display: block; font-weight: bold; margin-bottom: 4px;">Sender App Password</label>
+                            <input id="smtp-password" type="text" style="width: 100%; padding: 8px;" />
+                            <div style="font-size: 0.85em; color: #666; margin-top: 4px;"><a href="https://docs.google.com/document/d/1f_bRihhR2qFiwA509MvXZVlNbJndsgOzACk-xybwhkE/edit?usp=sharing" target="_blank">How to get App Password</a></div>
+                        </div>
+                        
+                        <div style="margin-top: 16px; display: flex; gap: 8px; align-items: center;">
+                            <button type="submit" style="padding: 10px 20px;">Save Settings</button>
+                            <button type="button" onclick="closeSettingsModal()" style="padding: 10px 20px;">Cancel</button>
+                            <span id="settings-status" style="margin-left: 12px; color: #666;"></span>
+                        </div>
                     </form>
                 </div>
             </div>

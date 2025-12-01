@@ -5,4 +5,4 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 GOOGLE_APPLICATION_CREDENTIALS=" "
-uvicorn main:app --reload --host 127.0.0.1 --port 8000
+.venv/bin/python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000

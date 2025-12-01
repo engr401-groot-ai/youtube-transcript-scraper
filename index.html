@@ -325,9 +325,9 @@
                         const resp = await fetch('/api/notification-settings');
                         const data = await resp.json();
                         if (data.ok && data.settings) {
-                            document.getElementById('smtp-user').value = data.settings.SMTP_USER || '';
-                            document.getElementById('smtp-password').value = data.settings.SMTP_PASSWORD || '';
-                            document.getElementById('to-emails').value = data.settings.TO_EMAILS || '';
+                            document.getElementById('sender').value = data.settings.sender || '';
+                            document.getElementById('password').value = data.settings.password || '';
+                            document.getElementById('to-emails').value = data.settings.recipients || '';
                         }
                     } catch (err) {
                         console.error('Failed to load settings:', err);
@@ -350,23 +350,23 @@
                     e.preventDefault();
                     
                     const settings = {
-                        SMTP_USER: document.getElementById('smtp-user').value.trim(),
-                        SMTP_PASSWORD: document.getElementById('smtp-password').value.trim(),
-                        TO_EMAILS: document.getElementById('to-emails').value.trim(),
+                        sender: document.getElementById('sender').value.trim(),
+                        password: document.getElementById('password').value.trim(),
+                        recipients: document.getElementById('to-emails').value.trim(),
                     };
 
                     const statusEl = document.getElementById('settings-status');
 
                     // Client-side validation
-                    if (settings.TO_EMAILS.includes(' ')) {
+                    if (settings.recipients.includes(' ')) {
                         if (statusEl) statusEl.textContent = '✗ Error: Recipients must be comma-separated with NO spaces.';
                         return;
                     }
-                    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.SMTP_USER)) {
+                    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.sender)) {
                         if (statusEl) statusEl.textContent = '✗ Error: Sender must be a valid email address (e.g. user@example.com).';
                         return;
                     }
-                    if (/\s/.test(settings.SMTP_PASSWORD)) {
+                    if (/\s/.test(settings.password)) {
                         if (statusEl) statusEl.textContent = '✗ Error: App Password must not contain whitespaces.';
                         return;
                     }
@@ -436,18 +436,18 @@
                         </div>
                         
                         <div style="margin-bottom: 12px;">
-                            <label for="smtp-user" style="display: block; font-weight: bold; margin-bottom: 4px;">Sender</label>
-                            <input id="smtp-user" type="email" required style="width: 100%; padding: 8px;" placeholder="your-email@example.com" />
+                            <label for="sender" style="display: block; font-weight: bold; margin-bottom: 4px;">Sender</label>
+                            <input id="sender" type="email" required style="width: 100%; padding: 8px;" placeholder="your-email@example.com" />
                         </div>
                         
                         <div style="margin-bottom: 12px;">
-                            <label for="smtp-password" style="display: block; font-weight: bold; margin-bottom: 4px;">Sender App Password</label>
-                            <input id="smtp-password" type="text" style="width: 100%; padding: 8px;" />
+                            <label for="password" style="display: block; font-weight: bold; margin-bottom: 4px;">Password</label>
+                            <input id="password" type="text" style="width: 100%; padding: 8px;" />
                             <div style="font-size: 0.85em; color: #666; margin-top: 4px;"><a href="https://docs.google.com/document/d/1f_bRihhR2qFiwA509MvXZVlNbJndsgOzACk-xybwhkE/edit?usp=sharing" target="_blank">How to get App Password</a></div>
                         </div>
                         
                         <div style="margin-top: 16px; display: flex; gap: 8px; align-items: center;">
-                            <button type="submit" style="padding: 10px 20px;">Save Settings</button>
+                            <button type="submit" style="padding: 10px 20px;">Save</button>
                             <button type="button" onclick="closeSettingsModal()" style="padding: 10px 20px;">Cancel</button>
                             <span id="settings-status" style="margin-left: 12px; color: #666;"></span>
                         </div>

@@ -1,13 +1,13 @@
-fastapi==0.115.4
-uvicorn[standard]==0.32.0
+fastapi
+uvicorn[standard]
 
-apify-client==1.9.2
+apify-client
 
-google-api-python-client==2.149.0
-google-cloud-bigquery==3.25.0
-google-cloud-storage==3.0.0
-google-cloud-secret-manager==2.21.1
+google-api-python-client
+google-cloud-bigquery
+google-cloud-storage
 google-cloud-run
+google-cloud-firestore
 
-python-dotenv==1.0.1
-apify-shared==1.1.2
+python-dotenv
+apify-shared

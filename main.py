@@ -1,56 +1,33 @@
-"""
-Apify-based YouTube Transcript Scraper for Hawaii Legislative Channels
-
-Key components and behavior
-    - YouTubeTranscriptScraper: core class that calls the YouTube API to
-        list completed live streams, calls an Apify actor to extract transcripts,
-    - FastAPI endpoints:
-            GET /health      - basic liveness + last summary
-            POST /run       - trigger an async scrape job
-            GET /search     - query explicit mentions (reads BigQuery)
-            GET /ui         - serves a local `index.html` UI
-            GET /          - redirects to /ui
-            GET /favicon.ico- (handled; returns 204)
-
-Usage(s)
-    - Cloud Run service exposes HTTP endpoints
-    - Dev server: `uvicorn main:app --reload --host 127.0.0.1 --port 8000`
-    - CLI run: `python main.py`
-    - Container: Dockerfile runs `uvicorn main:app ...` so the image serves the API/UI.
-"""
-
 import os
 import sys
 import logging
 import time
 import re
 import threading
+import html as html_escape
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Set, Optional, Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, Response
-import html as html_escape
+from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
+import google.auth
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from google.cloud import bigquery, secretmanager
-import google.auth
+from google.cloud import bigquery, firestore
 from apify_client import ApifyClient
 
-# -------------------------------
-# Env loading / configs
-# -------------------------------
 
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("scraper")
 
-from fastapi import FastAPI, Query
-from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI(title="UH YouTube Transcript Scraper (Apify)", version="0.4.0")
+# Initialize FastAPI and CORS
+app = FastAPI(title="Gro Office House and Senate YouTube Transcript Scraper", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,36 +41,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Load environment variables
+load_dotenv()
 
-
-def load_environment_variables() -> None:
-    """Load environment variables from Secret Manager (Cloud Run) or .env (local)."""
-    project_id = os.getenv("GCP_PROJECT_ID", "its-gro")
-    secret_name = f"projects/{project_id}/secrets/youtube-scraper-env/versions/latest"
-
-    try:
-        client = secretmanager.SecretManagerServiceClient()
-        response = client.access_secret_version(request={"name": secret_name})
-        payload = response.payload.data.decode("utf-8")
-
-        for line in payload.strip().splitlines():
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            os.environ[k.strip()] = v.strip()
-
-        logger.info("✓ Loaded environment variables from Secret Manager")
-        return
-
-    except Exception as e:
-        logger.info(f"Secret Manager load failed ({e}); falling back to .env")
-        load_dotenv()
-        logger.info("✓ Loaded environment variables from .env (if present)")
-        
-load_environment_variables()
-
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 BQ_DATASET = os.getenv("BQ_DATASET", "")
 BQ_HEARING_VIDEOS_TABLE = os.getenv("BQ_HEARING_VIDEOS_TABLE", "")
 BQ_MENTIONS_TABLE = os.getenv("BQ_MENTIONS_TABLE", "")
@@ -108,15 +60,27 @@ APIFY_LANGUAGE = os.getenv("APIFY_LANGUAGE", "en")
 MAX_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_VIDEOS_PER_CHANNEL", "10"))
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "30"))
 
+def validate_configuration() -> None:
+    """Validate that all required environment variables are set."""
+    required = {
+        "YOUTUBE_API_KEY": YOUTUBE_API_KEY,
+        "GCP_PROJECT_ID": GCP_PROJECT_ID,
+        "BQ_DATASET": BQ_DATASET,
+        "BQ_HEARING_VIDEOS_TABLE": BQ_HEARING_VIDEOS_TABLE,
+        "APIFY_TOKEN": APIFY_TOKEN,
+    }
+    missing = [k for k, v in required.items() if not v]
+    if missing:
+        msg = "Missing required env vars: " + ", ".join(missing)
+        logger.error(msg)
+        raise RuntimeError(msg)
+
 def _load_explicit_keywords_from_sheet(sheet_id: str, value_range: str = "A:A") -> List[str]:
-    """Load keywords from a Google Sheet (first column). Returns list of lowercase keywords.
-    Uses Application Default Credentials. Expects the sheet to have a header
-    (e.g., 'Term') — the header will be skipped.
-    """
+    """Load keywords from a Google Sheet (first column)."""
     if not sheet_id:
         return []
 
-    # Use ADC to call Sheets API once and return results (no retries, no fallback)
+    # Use Application Default Credentials (ADC) to call the Sheets API.
     try:
         creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
         logger.info("Using application default credentials for Sheets API (explicit keywords)")
@@ -124,11 +88,9 @@ def _load_explicit_keywords_from_sheet(sheet_id: str, value_range: str = "A:A") 
         resp = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=value_range).execute()
         values = resp.get("values", []) or []
 
-        # Log that the sheet range was successfully opened and how many rows were returned
         try:
             logger.info(f"Opened sheet {sheet_id} range {value_range} — {len(values)} rows")
         except Exception:
-            # Avoid any unexpected logging errors from breaking keyword loading
             logger.info(f"Opened sheet {sheet_id} range {value_range}")
 
         kws: List[str] = []
@@ -136,13 +98,12 @@ def _load_explicit_keywords_from_sheet(sheet_id: str, value_range: str = "A:A") 
             if not row:
                 continue
             cell = str(row[0]).strip()
-            # Skip header-like first row
             if i == 0 and cell.lower() in ("term", "keyword", "keywords"):
                 continue
             if cell:
                 kws.append(cell.lower())
 
-        # de-duplicate while preserving order
+        # De-duplicate while preserving order
         seen = set()
         out: List[str] = []
         for k in kws:
@@ -157,8 +118,9 @@ def _load_explicit_keywords_from_sheet(sheet_id: str, value_range: str = "A:A") 
         logger.warning(f"Could not load explicit keywords from sheet {sheet_id}: {e}")
         return []
 
-# Load explicit keywords from Google Sheets 
-# If EXPLICIT_SHEET_ID is not set, EXPLICIT_KEYWORDS will be an empty list and no explicit mentions will be extracted
+# Load explicit keywords from Google Sheets (if configured)
+# If no sheet is configured, `EXPLICIT_KEYWORDS` will be an empty list and
+# explicit mention extraction will be disabled.
 if EXPLICIT_SHEET_ID:
     value_range = EXPLICIT_SHEET_RANGE
     if EXPLICIT_SHEET_TAB:
@@ -166,36 +128,28 @@ if EXPLICIT_SHEET_ID:
 
     EXPLICIT_KEYWORDS = _load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
     if not EXPLICIT_KEYWORDS:
-        logger.warning("Explicit keywords sheet configured but returned no keywords; explicit mention extraction disabled.")
+        logger.warning(
+            "Explicit keywords sheet configured but returned no keywords; explicit mention extraction disabled."
+        )
         EXPLICIT_KEYWORDS = []
 else:
     logger.info("No EXPLICIT_SHEET_ID configured — explicit mention extraction disabled.")
     EXPLICIT_KEYWORDS = []
 
+# YouTube channels and their channel IDs (monitored channels)
 CHANNELS = [
     {"name": "Hawaii Senate", "channel_id": "UCekvvdL_uyq2DUyj1GjlrOA"},
     {"name": "Hawaii House of Representatives", "channel_id": "UCvoLAX1ww3e63K8qQ5of0bw"},
 ]
 
-def validate_configuration() -> None:
-    required = {
-        "YOUTUBE_API_KEY": YOUTUBE_API_KEY,
-        "GCP_PROJECT_ID": GCP_PROJECT_ID,
-        "BQ_DATASET": BQ_DATASET,
-        "BQ_HEARING_VIDEOS_TABLE": BQ_HEARING_VIDEOS_TABLE,
-        "APIFY_TOKEN": APIFY_TOKEN,
-    }
-    missing = [k for k, v in required.items() if not v]
-    if missing:
-        msg = "Missing required env vars: " + ", ".join(missing)
-        logger.error(msg)
-        raise RuntimeError(msg)
-
-# -------------------------------
-# Youtube core
-# -------------------------------
+# Core YouTubeTranscriptScraper class
 class YouTubeTranscriptScraper:
     def __init__(self):
+        """Initialize scraper clients and configuration.
+
+        Validates required environment variables, initializes the YouTube API
+        client, BigQuery client, table identifiers, and the Apify client.
+        """
         validate_configuration()
         self.youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY, cache_discovery=False)
         self.bq_client = self._init_bigquery_client()
@@ -204,6 +158,11 @@ class YouTubeTranscriptScraper:
         self.apify = ApifyClient(APIFY_TOKEN)
 
     def _init_bigquery_client(self) -> bigquery.Client:
+        """Create and return a BigQuery client.
+
+        Attempts to use Application Default Credentials (ADC); if that fails,
+        falls back to the default BigQuery client constructor.
+        """
         try:
             creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/bigquery"])
             logger.info("Using application default credentials for BigQuery")
@@ -213,6 +172,11 @@ class YouTubeTranscriptScraper:
             return bigquery.Client(project=GCP_PROJECT_ID)
 
     def get_existing_video_ids(self) -> Set[str]:
+        """Return a set of distinct `video_id` values already in the table.
+
+        On error, logs a warning and returns an empty set so the caller can
+        continue processing new videos.
+        """
         query = f"SELECT DISTINCT video_id FROM `{self.table_id}`"
         try:
             job = self.bq_client.query(query)
@@ -222,10 +186,19 @@ class YouTubeTranscriptScraper:
             return set()
 
     def get_channel_videos(self, channel_id: str, channel_name: str) -> List[str]:
+        """Return recent completed video IDs for the given channel.
+
+        Steps:
+        1. Resolve the channel's uploads playlist ID.
+        2. List recent items from the uploads playlist.
+        3. Fetch video metadata and filter out livestreams and items
+           older than `LOOKBACK_DAYS`.
+        Returns up to `MAX_VIDEOS_PER_CHANNEL` most recent IDs.
+        """
         try:
             logger.info(f"Fetching videos from {channel_name} via Uploads playlist...")
             
-            # 1. Get Uploads Playlist ID
+            # Step 1: Resolve the uploads playlist ID for the channel
             ch_resp = self.youtube.channels().list(
                 id=channel_id,
                 part="contentDetails"
@@ -238,7 +211,7 @@ class YouTubeTranscriptScraper:
                 
             uploads_playlist_id = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
             
-            # 2. Fetch recent items from playlist (50)
+            # Step 2: Fetch recent items from the uploads playlist (max 50)
             pl_req = self.youtube.playlistItems().list(
                 part="contentDetails",
                 playlistId=uploads_playlist_id,
@@ -253,8 +226,7 @@ class YouTubeTranscriptScraper:
                 
             video_ids = [item["contentDetails"]["videoId"] for item in pl_items]
             
-            # 3. Fetch video details to filter by status and date
-            # We need 'snippet' for liveBroadcastContent and 'liveStreamingDetails' for actual dates
+            # Step 3: Fetch video details to filter out livestreams and old uploads
             vid_req = self.youtube.videos().list(
                 part="snippet,liveStreamingDetails",
                 id=",".join(video_ids)
@@ -279,19 +251,16 @@ class YouTubeTranscriptScraper:
                 date_str = live_details.get("actualEndTime") or live_details.get("actualStartTime") or snippet["publishedAt"]
                 
                 try:
-                    # Handle Z or +00:00
                     if date_str.endswith("Z"):
                         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
                     else:
                         dt = datetime.fromisoformat(date_str)
                 except ValueError:
-                     # Fallback
                     dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
                 
                 if dt >= cutoff_date:
                     valid_videos.append({"id": vid, "date": dt})
                 else:
-                    # logger.debug(f"Skipping old video {vid} ({dt})")
                     pass
 
             # Sort by date descending
@@ -308,11 +277,11 @@ class YouTubeTranscriptScraper:
             logger.error(f"Unexpected error for {channel_name}: {e}")
             return []
 
-    # -------- Apify transcript extraction & upload --------
     def get_transcript_apify(self, video_id: str) -> List[Dict[str, Any]]:
-        """
-        Calls Apify actor for a single video and returns a list of segments:
-        [{start: float, end: float, text: str}, ...]
+        """Call Apify actor for `video_id` and return transcript segments.
+
+        Returns a list of segment dictionaries: [{"start": float, "end": float, "text": str}, ...].
+        The method retries up to several times before returning an empty list on failure.
         """
         youtube_url = f"https://www.youtube.com/watch?v={video_id}"
         run_input = {
@@ -358,6 +327,10 @@ class YouTubeTranscriptScraper:
         return []
 
     def upload_to_bigquery(self, video_id: str, segments: List[Dict[str, Any]]) -> tuple[bool, str, str]:
+        """Upload transcript segments for `video_id` into BigQuery.
+
+        Returns a tuple: (success: bool, video_name: str, created_timestamp: str).
+        """
         if not segments:
             return (False, "", "")
 
@@ -370,6 +343,7 @@ class YouTubeTranscriptScraper:
         except Exception as e:
             logger.debug(f"Could not fetch video title for {video_id}: {e}")
 
+        # Use Hawaii Standard Time for the `created_at` timestamp
         hst = timezone(timedelta(hours=-10))
         now_timestamp = datetime.now(tz=hst).isoformat()
 
@@ -403,7 +377,6 @@ class YouTubeTranscriptScraper:
             logger.error(f"BQ upload error for {video_id}: {e}")
             return (False, video_name, now_timestamp)
 
-    # -------- Extract & upload explicit mentions --------
     def extract_explicit_mentions(
         self,
         video_id: str,
@@ -411,6 +384,11 @@ class YouTubeTranscriptScraper:
         video_name: str,
         now_timestamp: str,
     ) -> List[Dict[str, Any]]:
+        """Scan transcript segments for configured explicit keywords.
+
+        Uses whole-word, case-insensitive regex matching to avoid false positives.
+        Returns a list of rows suitable for inserting into the mentions table.
+        """
         if not EXPLICIT_SHEET_ID:
             return []
 
@@ -424,9 +402,10 @@ class YouTubeTranscriptScraper:
 
         rows: List[Dict[str, Any]] = []
 
-        # Use regex whole-word matching to avoid substring false positives.
-        # For each keyword build a pattern like r"\bkeyword\b" (escaped).
-        patterns = [(kw, re.compile(r"\b" + re.escape(kw) + r"\b", flags=re.IGNORECASE)) for kw in keywords if kw]
+        # Build whole-word, case-insensitive regex patterns for each keyword
+        patterns = [
+            (kw, re.compile(r"\b" + re.escape(kw) + r"\b", flags=re.IGNORECASE)) for kw in keywords if kw
+        ]
 
         for idx, seg in enumerate(segments):
             text = seg.get("text", "") or ""
@@ -452,6 +431,11 @@ class YouTubeTranscriptScraper:
         return rows
 
     def upload_mentions(self, rows: List[Dict[str, Any]]) -> bool:
+        """Insert explicit mention rows into the mentions BigQuery table.
+
+        Returns True on success. If `rows` is empty returns True immediately.
+        Logs and returns False on failure.
+        """
         if not rows:
             return True
         vid = rows[0]["video_id"]
@@ -466,8 +450,12 @@ class YouTubeTranscriptScraper:
             logger.error(f"BQ mention upload error for {vid}: {e}")
             return False
 
-    # -------- Proccess video & run scraper --------
     def process_video(self, video_id: str) -> bool:
+        """Process a single video: fetch transcript, upload segments, and
+        extract and upload explicit mentions.
+
+        Returns True only if both transcript upload and mention upload succeed.
+        """
         segments = self.get_transcript_apify(video_id)
         if not segments:
             logger.info(f"No transcript for {video_id}; skipping")
@@ -479,6 +467,10 @@ class YouTubeTranscriptScraper:
         return ok_full and ok_mentions
 
     def run_once(self) -> Dict[str, int]:
+        """Run one scraping cycle across all configured channels.
+
+        Returns a summary dict with counts for processed, skipped, and failed.
+        """
         existing = self.get_existing_video_ids()
 
         processed = skipped = failed = 0
@@ -499,14 +491,17 @@ class YouTubeTranscriptScraper:
 
         return {"processed": processed, "skipped": skipped, "failed": failed}
 
-# -------------------------------
-# Service wrapper state
-# -------------------------------
+# Service wrapper state (keeps track of last run summary and concurrency)
 _last_summary: Optional[Dict[str, int]] = None
 _is_running = False
 _lock = threading.Lock()
 
 def _run_scrape_job():
+    """Thread-safe wrapper to run the scraping job once.
+
+    Uses a module-level lock to prevent concurrent runs and updates
+    the `_last_summary` and `_is_running` status variables.
+    """
     global _last_summary, _is_running
 
     with _lock:
@@ -529,18 +524,7 @@ def _run_scrape_job():
         with _lock:
             _is_running = False
 
-# -------------------------------
-# Fast API endpoints
-# -------------------------------
-@app.get("/health")
-def health():
-    return {"ok": True, "running": _is_running, "last_summary": _last_summary}
-
-@app.post("/run")
-def run():
-    _run_scrape_job()
-    return {"status": "completed", "summary": _last_summary}
-
+# FRONT END ROUTES
 @app.get("/", include_in_schema=False)
 def root_redirect():
     """Redirect root to the UI page"""
@@ -560,11 +544,21 @@ def ui():
         return FileResponse(index_path, media_type="text/html")
     return HTMLResponse("<h1>index.html not found</h1>", status_code=404)
 
+# BACK END ROUTES
+@app.get("/health")
+def health():
+    """Health endpoint returning process status and last run summary."""
+    return {"ok": True, "running": _is_running, "last_summary": _last_summary}
+
+@app.post("/run")
+def run():
+    """Trigger a scraping job (if not already running) and return the last summary."""
+    _run_scrape_job()
+    return {"status": "completed", "summary": _last_summary}
+
 @app.get("/video/{video_id}/view", include_in_schema=False)
 def video_page(video_id: str):
-    """Render a simple dynamic page for a given video_id.
-    """
-
+    """Render a simple dynamic page for a given video_id."""
     client = bigquery.Client(project=GCP_PROJECT_ID)
     hv_table = f"{GCP_PROJECT_ID}.{BQ_DATASET}.hearing_videos"
 
@@ -608,6 +602,11 @@ def search_explicit_mentions(
     q: str = Query(..., description="keyword/text to search for"),
     limit: int = Query(50, ge=1, le=500),
 ):
+    """Search explicit mentions by keyword or text.
+
+    Returns recent mention rows matching `q` in the `text` or `keyword` fields,
+    limited to `limit` results ordered by `created_at` descending.
+    """
     client = bigquery.Client(project=GCP_PROJECT_ID)
     table = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_MENTIONS_TABLE}"
 
@@ -645,7 +644,6 @@ def search_explicit_mentions(
         })
     return {"q": q, "count": len(out), "results": out}
 
-# TODO: MAKE A NEW BIGQUERY TABLE FOR VIDEOS (video_id, video_url, video_name) AND UPDATE THE SCRAPER TO UPLOAD TO THAT TABLE
 @app.get("/list-videos")
 def list_videos(
     limit: int = Query(100, ge=1, le=5000, description="maximum number of videos to return"),
@@ -872,128 +870,88 @@ def get_recent_mentions(
 @app.get("/api/notification-settings")
 def get_notification_settings():
     """
-    Fetch current notification settings from Secret Manager.
-    Returns only SMTP_USER, SMTP_PASSWORD, and TO_EMAILS.
+    Fetch current settings from Firestore.
+    Returns keys: sender, password, recipients (CSV string for easy editing).
     """
-    project_id = os.getenv("GCP_PROJECT_ID", "its-gro")
-    secret_name = f"projects/{project_id}/secrets/notification-system-env/versions/latest"
-    
     try:
-        client = secretmanager.SecretManagerServiceClient()
-        response = client.access_secret_version(request={"name": secret_name})
-        payload = response.payload.data.decode("utf-8")
-        
-        settings = {}
-        for line in payload.strip().splitlines():
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            key = k.strip()
-            value = v.strip()
-            
-            # Only expose these three fields
-            if key == "SMTP_USER":
-                settings["SMTP_USER"] = value
-            elif key == "SMTP_PASSWORD":
-                settings["SMTP_PASSWORD"] = value  # Return actual password for pre-population
-            elif key == "TO_EMAILS":
-                settings["TO_EMAILS"] = value
-        
+        db = firestore.Client(database="notification-system")
+        doc_ref = db.collection("settings").document("configuration")
+        doc = doc_ref.get()
+
+        if not doc.exists:
+            return {
+                "ok": True,
+                "settings": {"sender": "", "password": "", "recipients": ""},
+            }
+
+        data = doc.to_dict() or {}
+
+        # Convert Firestore Array -> CSV String for the UI text input
+        recipients_list = data.get("recipients", [])
+        recipients_str = ""
+        if isinstance(recipients_list, list):
+            recipients_str = ",".join(recipients_list)
+
+        settings = {
+            "sender": data.get("sender", ""),
+            "password": data.get("password", ""),
+            "recipients": recipients_str,
+        }
+
         return {"ok": True, "settings": settings}
-    
+
     except Exception as e:
         logger.error(f"Failed to fetch notification settings: {e}")
         return {"ok": False, "error": str(e)}
 
 @app.post("/api/notification-settings")
-async def update_notification_settings(request: Request, dry_run: bool = Query(False)):
+async def update_notification_settings(request: Request):
     """
-    Update notification settings by creating a new version in Secret Manager.
-    Only updates SMTP_USER, SMTP_PASSWORD, and TO_EMAILS.
-    All other settings are preserved from the current version.
-    
-    Expected request body:
-    {
-        "SMTP_USER": "email@example.com",
-        "SMTP_PASSWORD": "app_password",
-        "TO_EMAILS": "email1@example.com,email2@example.com"
-    }
+    Update settings in Firestore: sender, password, recipients.
     """
-    project_id = os.getenv("GCP_PROJECT_ID", "its-gro")
-    secret_id = "notification-system-env"
-    secret_name = f"projects/{project_id}/secrets/{secret_id}"
-    
     try:
-        # Get current settings first
-        client = secretmanager.SecretManagerServiceClient()
-        current_version = client.access_secret_version(
-            request={"name": f"{secret_name}/versions/latest"}
-        )
-        current_payload = current_version.payload.data.decode("utf-8")
-        
-        # Parse current settings
-        current_settings = {}
-        for line in current_payload.strip().splitlines():
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            current_settings[k.strip()] = v.strip()
-        
-        # Update only the three allowed fields
         body = await request.json()
-        allowed_fields = ["SMTP_USER", "SMTP_PASSWORD", "TO_EMAILS"]
-        
-        for key in allowed_fields:
-            if key in body and body[key] is not None:
-                val = body[key].strip()
-                
-                # Validation logic
-                if key == "TO_EMAILS":
-                    # "comma seperation with no spaces"
-                    if " " in val:
-                        return {"ok": False, "error": "Recipients must be comma-separated with NO spaces."}
-                    # Optional: validate each part is an email-like string
-                    parts = val.split(",")
-                    for p in parts:
-                        if "@" not in p:
-                            return {"ok": False, "error": f"Invalid email in recipients: {p}"}
-                            
-                elif key == "SMTP_USER":
-                    # "singular and correct email"
-                    # Simple regex for email: something@something.something
-                    if not re.match(r"[^@\s]+@[^@\s]+\.[^@\s]+", val) or "," in val:
-                        return {"ok": False, "error": "Sender must be a single valid email address (e.g. user@example.com)."}
-                        
-                elif key == "SMTP_PASSWORD":
-                    # "single string, no whitespaces"
-                    if any(c.isspace() for c in val):
-                        return {"ok": False, "error": "App Password must not contain whitespaces."}
+        updates = {}
 
-                current_settings[key] = val
-        
-        # Build new secret payload
-        new_payload = "\n".join([f"{k}={v}" for k, v in current_settings.items()])
-        
-        if dry_run:
-            logger.info(f"Dry run: would save payload length {len(new_payload)}")
-            return {
-                "ok": True, 
-                "message": "Dry run successful. Validation passed.", 
-                "would_save": current_settings
-            }
+        # 1. Handle Sender
+        if "sender" in body and body["sender"] is not None:
+            val = str(body["sender"]).strip()
+            if not re.match(r"[^@\s]+@[^@\s]+\.[^@\s]+", val) or "," in val:
+                return {"ok": False, "error": "Sender must be a single valid email address."}
+            updates["sender"] = val
 
-        # Add new version to the secret
-        parent = client.secret_path(project_id, secret_id)
-        response = client.add_secret_version(
-            request={
-                "parent": parent,
-                "payload": {"data": new_payload.encode("utf-8")},
-            }
-        )
-        
-        logger.info(f"Created new secret version: {response.name}")
-        return {"ok": True, "message": "Settings updated successfully", "version": response.name}
-    
+        # 2. Handle Password
+        if "password" in body and body["password"] is not None:
+            val = str(body["password"]).strip()
+            if any(c.isspace() for c in val):
+                return {"ok": False, "error": "Password must not contain whitespaces."}
+            if val:  # Only update if not empty
+                updates["password"] = val
+
+        # 3. Handle Recipients (String -> Array)
+        if "recipients" in body and body["recipients"] is not None:
+            val = str(body["recipients"]).strip()
+            if " " in val:
+                return {"ok": False, "error": "Recipients must be comma-separated with NO spaces."}
+
+            # Convert CSV string to List
+            email_list = [e.strip() for e in val.split(",") if e.strip()]
+
+            for email in email_list:
+                if "@" not in email:
+                    return {"ok": False, "error": f"Invalid email in recipients: {email}"}
+
+            updates["recipients"] = email_list
+
+        # Write to Firestore
+        if updates:
+            db = firestore.Client(database="notification-system")
+            doc_ref = db.collection("settings").document("configuration")
+            doc_ref.set(updates, merge=True)
+            logger.info("Updated Firestore settings")
+
+        return {"ok": True, "message": "Settings updated successfully"}
+
     except Exception as e:
         logger.error(f"Failed to update notification settings: {e}")
         return {"ok": False, "error": str(e)}
@@ -1013,10 +971,9 @@ def keywords():
     kws = _load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
     return {"count": len(kws), "keywords": kws}
 
-# -------------------------------
-# CLI entrypoint
-# -------------------------------
+# CLI ENTRYPOINT
 def main():
+    """CLI entrypoint: run the scraper once and log a summary."""
     try:
         scraper = YouTubeTranscriptScraper()
         summary = scraper.run_once()

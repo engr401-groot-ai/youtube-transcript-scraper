@@ -34,6 +34,7 @@ app.add_middleware(
     allow_origins=[
         "https://youtube-transcript-scraper.lovable.app",  # published Lovable site
         "https://lovable.dev",
+        "https://daily-youtube-scraper-655654578945.us-central1.run.app",
     ],
     allow_origin_regex=r"https://.*\.lovableproject\.com",  # preview subdomains
     allow_credentials=True,

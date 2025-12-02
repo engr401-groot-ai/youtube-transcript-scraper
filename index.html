@@ -74,6 +74,7 @@
 
                 let allVideos = [];
                 let allMentions = [];
+                const NOTIFICATION_SYSTEM_SERVER = 'https://notification-system-server-655654578945.us-west1.run.app';
 
                 function showVideosTab() {
                     document.getElementById('videos-tab').style.display = '';
@@ -322,7 +323,7 @@
                     
                     // Load current settings
                     try {
-                        const resp = await fetch('/api/notification-settings');
+                        const resp = await fetch(`${NOTIFICATION_SYSTEM_SERVER}/api/notification-settings`);
                         const data = await resp.json();
                         if (data.ok && data.settings) {
                             document.getElementById('sender').value = data.settings.sender || '';
@@ -374,25 +375,31 @@
                     if (statusEl) statusEl.textContent = 'Saving...';
                     
                     try {
-                        const resp = await fetch('/api/notification-settings', {
+                        const submitBtn = (e.target && e.target.querySelector) ? e.target.querySelector('button[type="submit"]') : null;
+                        if (submitBtn) submitBtn.disabled = true;
+
+                        const resp = await fetch(`${NOTIFICATION_SYSTEM_SERVER}/api/notification-settings`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify(settings)
                         });
-                        
+
                         const data = await resp.json();
                         if (data.ok) {
                             if (statusEl) statusEl.textContent = '✓ Settings saved successfully!';
                             setTimeout(() => {
                                 if (statusEl) statusEl.textContent = '';
                                 closeSettingsModal();
+                                if (submitBtn) submitBtn.disabled = false;
                             }, 1500);
                         } else {
                             if (statusEl) statusEl.textContent = '✗ Error: ' + (data.error || 'Unknown error');
+                            if (submitBtn) submitBtn.disabled = false;
                         }
                     } catch (err) {
                         console.error('Failed to save settings:', err);
                         if (statusEl) statusEl.textContent = '✗ Failed to save settings';
+                        try { const submitBtn = (e.target && e.target.querySelector) ? e.target.querySelector('button[type="submit"]') : null; if (submitBtn) submitBtn.disabled = false; } catch (ee) {}
                     }
                 }
 

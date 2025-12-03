@@ -22,13 +22,13 @@
     </head>
     <body>
         <div id="page-content">
+
             <h2>UH Mentions Search v1.0</h2>
             <p>Search explicit UH mention segments across transcribed hearing videos.</p>
-            <p id="coverage-summary" style="margin-top:4px;color:#555;font-size:0.95em;"></p>
 
-            <!-- Tabs (Mentions is the only main view now) -->
+            <!-- Tabs -->
             <div style="margin-bottom: 12px;">
-                <button id="tab-mentions-btn" disabled>Mentions</button>
+                <button id="tab-mentions-btn" onclick="showMentionsTab()" disabled>Mentions</button>
                 <button id="keywords-btn" onclick="openKeywordsModal()" title="Show keywords">Keywords</button>
                 <button id="settings-btn" onclick="openSettingsModal()" title="Notification Settings">Settings</button>
             </div>
@@ -37,7 +37,7 @@
                 <input id="q_shared" placeholder="Search mentions (e.g., board of regents, mauna kea)" style="width:420px;" />
                 <button onclick="doSearch()">Search</button>
                 <button onclick="clearSearch()">Clear</button>
-                <span id="status_mentions" style="margin-left: 12px; display: inline-block;"></span>
+                <span id="status_mentions" style="margin-left: 12px;"></span>
             </div>
 
             <div id="mentions-tab">
@@ -45,148 +45,102 @@
             </div>
 
             <script>
-                async function runMentionSearch() {
-                    const q = document.getElementById("q_shared").value.trim();
-                    if (!q) { return; }
-                    const statusEl = document.getElementById("status_mentions");
-                    if (statusEl) statusEl.textContent = " searching...";
-                    const res = await fetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
-                    const data = await res.json();
-                    if (statusEl) statusEl.textContent = ` ${data.count} results`;
-                    renderMentions(data.results || []);
-                }
-
-                // state
                 let allMentions = [];
                 const NOTIFICATION_SYSTEM_SERVER = 'https://notification-system-server-655654578945.us-west1.run.app';
 
                 function showMentionsTab() {
-                    const tab = document.getElementById('mentions-tab');
-                    if (tab) tab.style.display = '';
+                    document.getElementById('mentions-tab').style.display = '';
+                    document.getElementById('tab-mentions-btn').disabled = true;
+
                     const el = document.getElementById('q_shared');
-                    if (el) { el.placeholder = 'Search mentions (e.g., board of regents, mauna kea)'; }
-                }
+                    if (el) el.placeholder = 'Search mentions (e.g., board of regents, mauna kea)';
 
-                // Keywords modal
-                function openKeywordsModal() {
-                    const overlay = document.getElementById('keywords-modal-overlay');
-                    if (!overlay) return;
-                    overlay.style.display = 'flex';
-                    // prevent background scrolling and interactions
-                    try { document.body.classList.add('modal-open'); } catch (e) { /*ignore*/ }
-                    try { const page = document.getElementById('page-content'); if (page) page.setAttribute('aria-hidden', 'true'); } catch (e) {}
-                    // load keywords
-                    fetch('/keywords')
-                        .then(r => r.json())
-                        .then(data => {
-                            const list = (data && data.keywords) ? data.keywords : [];
-                            const el = document.getElementById('keywords-list');
-                            if (el) el.textContent = list.join(', ');
-                            const countEl = document.getElementById('keywords-count');
-                            if (countEl) countEl.textContent = `${list.length} keywords`;
-                            // trap focus in modal
-                            trapFocus(document.querySelector('#keywords-modal-overlay .modal'));
-                        })
-                        .catch(err => {
-                            console.error('Could not load keywords', err);
-                            const el = document.getElementById('keywords-list'); if (el) el.textContent = 'Error loading keywords';
-                            const countEl = document.getElementById('keywords-count'); if (countEl) countEl.textContent = '0 keywords';
-                        });
-                    // focus the suggestion input if present
-                    try { setTimeout(() => { const inp = document.getElementById('keyword-suggest-input'); if (inp) inp.focus(); }, 120); } catch (e) { /*ignore*/ }
-                }
+                    const sm = document.getElementById('status_mentions');
+                    if (sm) sm.style.display = '';
 
-                function closeKeywordsModal() {
-                    const overlay = document.getElementById('keywords-modal-overlay');
-                    if (!overlay) return;
-                    overlay.style.display = 'none';
-                    try { document.body.classList.remove('modal-open'); } catch (e) { /*ignore*/ }
-                    try { const page = document.getElementById('page-content'); if (page) page.removeAttribute('aria-hidden'); } catch (e) {}
-                    releaseFocusTrap();
-                }
-
-                // Handle suggestion form submit (no backend) — just console.log the suggestion
-                function suggestKeyword(e) {
-                    try {
-                        e.preventDefault();
-                        const val = (document.getElementById('keyword-suggest-input') || {}).value || '';
-                        if (!val || !val.trim()) return;
-                        console.log('Keyword suggestion submitted:', val.trim());
-                        // Provide minimal UX: clear input and show a console-visible confirmation
-                        const inp = document.getElementById('keyword-suggest-input'); if (inp) inp.value = '';
-                        // Optionally flash a tiny message in modal (non-persistent)
-                        const countEl = document.getElementById('keywords-count');
-                        if (countEl) {
-                            const prev = countEl.textContent;
-                            countEl.textContent = 'Thanks — suggestion logged';
-                            setTimeout(() => { countEl.textContent = prev; }, 1400);
-                        }
-                    } catch (err) {
-                        console.error('suggestKeyword error', err);
+                    if (allMentions && allMentions.length > 0) {
+                        renderMentions(allMentions);
+                    } else {
+                        loadMentionsDefault();
                     }
                 }
 
-                // Simple focus trap implementation scoped to the modal element.
-                let _focusTrapHandler = null;
-                function trapFocus(modalEl) {
-                    try {
-                        if (!modalEl) return;
-                        const focusable = Array.from(modalEl.querySelectorAll('a,button,input,textarea,select,[tabindex]:not([tabindex="-1"])')).filter(el => !el.hasAttribute('disabled'));
-                        if (!focusable.length) return;
-                        let idx = 0;
-                        focusable[0].focus();
-                        _focusTrapHandler = function (ev) {
-                            if (ev.key !== 'Tab') return;
-                            ev.preventDefault();
-                            if (ev.shiftKey) idx = (idx - 1 + focusable.length) % focusable.length;
-                            else idx = (idx + 1) % focusable.length;
-                            focusable[idx].focus();
-                        };
-                        document.addEventListener('keydown', _focusTrapHandler);
-                    } catch (e) { console.warn('trapFocus error', e); }
-                }
+                async function runMentionSearch() {
+                    const q = document.getElementById("q_shared").value.trim();
+                    if (!q) return;
+                    document.getElementById("status_mentions").textContent = " searching...";
 
-                function releaseFocusTrap() {
-                    try {
-                        if (_focusTrapHandler) {
-                            document.removeEventListener('keydown', _focusTrapHandler);
-                            _focusTrapHandler = null;
-                        }
-                    } catch (e) { /*ignore*/ }
+                    const res = await fetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
+                    const data = await res.json();
+
+                    document.getElementById("status_mentions").textContent = ` ${data.count} results`;
+
+                    const root = document.getElementById("results");
+                    root.innerHTML = "";
+                    for (const r of data.results) {
+                        const div = document.createElement("div");
+                        div.className = "card";
+                        div.innerHTML = `
+                            <div class="meta"><b>${r.video_name || r.video_id}</b></div>
+                            <div class="meta">keyword: <code>${r.keyword}</code> • start: ${r.start_sec}s</div>
+                            <div class="text">${r.text}</div>
+                            <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
+                        `;
+                        root.appendChild(div);
+                    }
                 }
 
                 async function loadMentionsDefault() {
-                    const st = document.getElementById('status_mentions'); if (st) st.textContent = '';
+                    const st = document.getElementById('status_mentions');
+                    if (st) st.textContent = '';
+
                     try {
                         const resp = await fetch(`/list_mentions?limit=100`);
                         const data = await resp.json();
+                        const root = document.getElementById('results');
+                        root.innerHTML = '';
+
                         const items = data.results || [];
                         allMentions = items.slice();
-                        renderMentions(items);
+
+                        for (const r of items) {
+                            const div = document.createElement('div');
+                            div.className = 'card';
+                            div.innerHTML = `
+                                <div class="meta"><b>${r.video_name || r.video_id}</b></div>
+                                <div class="meta">keyword: <code>${r.keyword || ''}</code> • start: ${r.start_sec}s</div>
+                                <div class="text">${r.text || ''}</div>
+                                <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
+                            `;
+                            root.appendChild(div);
+                        }
+
                         if (st) st.textContent = ` ${items.length} results`;
+
                     } catch (err) {
                         if (st) st.textContent = ' error loading mentions';
                         console.error('loadMentionsDefault error', err);
                     }
                 }
 
-                // Render a list of mention objects
                 function renderMentions(items) {
                     const root = document.getElementById('results');
                     root.innerHTML = '';
+
                     for (const r of items) {
                         const div = document.createElement('div');
                         div.className = 'card';
-                        const ts_url = r.timestamp_url || ((r.video_url && typeof r.start_sec !== 'undefined') ? `${r.video_url}&t=${Math.floor(r.start_sec)}s` : (r.video_url || '#'));
                         div.innerHTML = `
                             <div class="meta"><b>${r.video_name || r.video_id}</b></div>
-                            <div class="meta">keyword: <code>${r.keyword || ''}</code> • start: ${r.start_sec || ''}s</div>
+                            <div class="meta">keyword: <code>${r.keyword || ''}</code> • start: ${r.start_sec}s</div>
                             <div class="text">${r.text || ''}</div>
                             <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
                         `;
                         root.appendChild(div);
                     }
-                    const st = document.getElementById('status_mentions'); if (st) st.textContent = ` ${items.length} results`;
+
+                    const st = document.getElementById('status_mentions');
+                    if (st) st.textContent = ` ${items.length} results`;
                 }
 
                 function doSearch() {
@@ -195,8 +149,8 @@
 
                 function clearSearch() {
                     const el = document.getElementById('q_shared');
-                    if (el) { el.value = ''; }
-                    // restore the cached full mentions list (or reload if empty)
+                    if (el) el.value = '';
+
                     if (allMentions && allMentions.length > 0) {
                         renderMentions(allMentions);
                     } else {
@@ -204,171 +158,86 @@
                     }
                 }
 
-                async function openSettingsModal() {
-                    const overlay = document.getElementById('settings-modal-overlay');
+                async function openKeywordsModal() {
+                    const overlay = document.getElementById('keywords-modal-overlay');
                     if (!overlay) return;
                     overlay.style.display = 'flex';
-                    try { document.body.classList.add('modal-open'); } catch (e) { /*ignore*/ }
-                    try { const page = document.getElementById('page-content'); if (page) page.setAttribute('aria-hidden', 'true'); } catch (e) {}
-                    
-                    // Load current settings
-                    try {
-                        const resp = await fetch(`${NOTIFICATION_SYSTEM_SERVER}/api/notification-settings`);
-                        const data = await resp.json();
-                        if (data.ok && data.settings) {
-                            document.getElementById('sender').value = data.settings.sender || '';
-                            document.getElementById('password').value = data.settings.password || '';
-                            document.getElementById('to-emails').value = data.settings.recipients || '';
-                        }
-                    } catch (err) {
-                        console.error('Failed to load settings:', err);
-                        alert('Failed to load current settings');
-                    }
-                    
-                    trapFocus(document.querySelector('#settings-modal-overlay .modal'));
-                }
-                
-                function closeSettingsModal() {
-                    const overlay = document.getElementById('settings-modal-overlay');
-                    if (!overlay) return;
-                    overlay.style.display = 'none';
-                    try { document.body.classList.remove('modal-open'); } catch (e) { /*ignore*/ }
-                    try { const page = document.getElementById('page-content'); if (page) page.removeAttribute('aria-hidden'); } catch (e) {}
-                    releaseFocusTrap();
-                }
-                
-                async function saveSettings(e) {
-                    e.preventDefault();
-                    
-                    const settings = {
-                        sender: document.getElementById('sender').value.trim(),
-                        password: document.getElementById('password').value.trim(),
-                        recipients: document.getElementById('to-emails').value.trim(),
-                    };
 
-                    const statusEl = document.getElementById('settings-status');
+                    try { document.body.classList.add('modal-open'); } catch (e) {}
+                    try { document.getElementById('page-content').setAttribute('aria-hidden', 'true'); } catch (e) {}
 
-                    // Client-side validation
-                    if (settings.recipients.includes(' ')) {
-                        if (statusEl) statusEl.textContent = '✗ Error: Recipients must be comma-separated with NO spaces.';
-                        return;
-                    }
-                    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.sender)) {
-                        if (statusEl) statusEl.textContent = '✗ Error: Sender must be a valid email address (e.g. user@example.com).';
-                        return;
-                    }
-                    if (/\s/.test(settings.password)) {
-                        if (statusEl) statusEl.textContent = '✗ Error: App Password must not contain whitespaces.';
-                        return;
-                    }
-                    
-                    if (statusEl) statusEl.textContent = 'Saving...';
-                    
-                    try {
-                        const submitBtn = (e.target && e.target.querySelector) ? e.target.querySelector('button[type="submit"]') : null;
-                        if (submitBtn) submitBtn.disabled = true;
-
-                        const resp = await fetch(`${NOTIFICATION_SYSTEM_SERVER}/api/notification-settings`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(settings)
+                    fetch('/keywords')
+                        .then(r => r.json())
+                        .then(data => {
+                            document.getElementById('keywords-list').textContent = data.keywords.join(', ');
+                            document.getElementById('keywords-count').textContent = `${data.keywords.length} keywords`;
                         });
 
-                        const data = await resp.json();
-                        if (data.ok) {
-                            if (statusEl) statusEl.textContent = '✓ Settings saved successfully!';
-                            setTimeout(() => {
-                                if (statusEl) statusEl.textContent = '';
-                                closeSettingsModal();
-                                if (submitBtn) submitBtn.disabled = false;
-                            }, 1500);
-                        } else {
-                            if (statusEl) statusEl.textContent = '✗ Error: ' + (data.error || 'Unknown error');
-                            if (submitBtn) submitBtn.disabled = false;
-                        }
-                    } catch (err) {
-                        console.error('Failed to save settings:', err);
-                        if (statusEl) statusEl.textContent = '✗ Failed to save settings';
-                        try { const submitBtn = (e.target && e.target.querySelector) ? e.target.querySelector('button[type="submit"]') : null; if (submitBtn) submitBtn.disabled = false; } catch (ee) {}
-                    }
+                    setTimeout(() => {
+                        const inp = document.getElementById('keyword-suggest-input');
+                        if (inp) inp.focus();
+                    }, 120);
                 }
 
-                async function loadStats() {
-                    const el = document.getElementById('coverage-summary');
-                    if (!el) return;
-                    try {
-                        const resp = await fetch('/stats');
-                        const data = await resp.json();
-                        const total = data.total_videos ?? 0;
-                        const withMentions = data.videos_with_mentions ?? 0;
-                        let sinceText = '';
-                        if (data.since_date) {
-                            const dt = new Date(data.since_date);
-                            sinceText = dt.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-                        } else {
-                            sinceText = 'transcripts started';
-                        }
-                        el.innerHTML = `Since ${sinceText}, <b>${total}</b> videos were transcribed; <b>${withMentions}</b> contain UH mentions.`;
-                    } catch (err) {
-                        console.error('loadStats error', err);
-                    }
+                function closeKeywordsModal() {
+                    document.getElementById('keywords-modal-overlay').style.display = 'none';
+                    document.body.classList.remove('modal-open');
+                    document.getElementById('page-content').removeAttribute('aria-hidden');
                 }
 
-                // initialize
+                async function openSettingsModal() {
+                    const overlay = document.getElementById('settings-modal-overlay');
+                    overlay.style.display = 'flex';
+                    document.body.classList.add('modal-open');
+                }
+
+                function closeSettingsModal() {
+                    document.getElementById('settings-modal-overlay').style.display = 'none';
+                    document.body.classList.remove('modal-open');
+                }
+
+                // INIT
                 showMentionsTab();
                 loadMentionsDefault();
-                loadStats();
             </script>
-        </div> <!-- /#page-content -->
+        </div>
 
-        <!-- Keywords modal overlay -->
+        <!-- Keywords Modal -->
         <div id="keywords-modal-overlay" class="modal-overlay">
-            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="keywords-title">
+            <div class="modal" role="dialog" aria-modal="true">
                 <div class="modal-header">
                     <div id="keywords-count">0 keywords</div>
-                    <div><button onclick="closeKeywordsModal()">Close</button></div>
+                    <button onclick="closeKeywordsModal()">Close</button>
                 </div>
                 <div class="modal-body">
                     <div class="keywords-row" id="keywords-list">(loading...)</div>
-                    <form id="keyword-suggest-form" class="keyword-suggest" onsubmit="suggestKeyword(event)">
-                        <input id="keyword-suggest-input" type="text" placeholder="Suggest a keyword" aria-label="Suggest a keyword" />
+                    <form class="keyword-suggest" onsubmit="suggestKeyword(event)">
+                        <input id="keyword-suggest-input" type="text" placeholder="Suggest a keyword" />
                         <button type="submit">Submit</button>
                     </form>
                 </div>
             </div>
         </div>
-        
-        <!-- Settings modal overlay -->
+
+        <!-- Settings Modal -->
         <div id="settings-modal-overlay" class="modal-overlay">
-            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+            <div class="modal">
                 <div class="modal-header">
-                    <h3 id="settings-title" style="margin:0;">Notification Settings</h3>
+                    <h3>Notification Settings</h3>
                     <button onclick="closeSettingsModal()">Close</button>
                 </div>
-                <div class="modal-body" style="max-height: 60vh; overflow-y: auto;">
-                    <form id="settings-form" onsubmit="saveSettings(event)">
-                        <div style="margin-bottom: 12px;">
-                            <label for="to-emails" style="display: block; font-weight: bold; margin-bottom: 4px;">Recipients</label>
-                            <input id="to-emails" type="text" required style="width: 100%; padding: 8px;" placeholder="email1@example.com,email2@example.com" />
-                            <div style="font-size: 0.85em; color: #666; margin-top: 4px;">Note: comma seperated (e.g. email@example.com,email@example.com)</div>
-                        </div>
-                        
-                        <div style="margin-bottom: 12px;">
-                            <label for="sender" style="display: block; font-weight: bold; margin-bottom: 4px;">Sender</label>
-                            <input id="sender" type="email" required style="width: 100%; padding: 8px;" placeholder="your-email@example.com" />
-                        </div>
-                        
-                        <div style="margin-bottom: 12px;">
-                            <label for="password" style="display: block; font-weight: bold; margin-bottom: 4px;">Password</label>
-                            <input id="password" type="text" style="width: 100%; padding: 8px;" />
-                            <div style="font-size: 0.85em; color: #666; margin-top: 4px;"><a href="https://docs.google.com/document/d/1f_bRihhR2qFiwA509MvXZVlNbJndsgOzACk-xybwhkE/edit?usp=sharing" target="_blank">How to get App Password</a></div>
-                        </div>
-                        
-                        <div style="margin-top: 16px; display: flex; gap: 8px; align-items: center;">
-                            <button type="submit" style="padding: 10px 20px;">Save</button>
-                            <button type="button" onclick="closeSettingsModal()" style="padding: 10px 20px;">Cancel</button>
-                            <span id="settings-status" style="margin-left: 12px; color: #666;"></span>
-                        </div>
+                <div class="modal-body">
+                    <form id="settings-form">
+                        <label>Recipients</label>
+                        <input id="to-emails" type="text" style="width:100%;" />
+
+                        <label>Sender</label>
+                        <input id="sender" type="email" style="width:100%;" />
+
+                        <label>Password</label>
+                        <input id="password" type="text" style="width:100%;" />
+
+                        <button type="button" onclick="closeSettingsModal()">Close</button>
                     </form>
                 </div>
             </div>

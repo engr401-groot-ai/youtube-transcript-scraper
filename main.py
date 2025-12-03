@@ -649,9 +649,9 @@ def search_explicit_mentions(
 def list_videos(
     limit: int = Query(100, ge=1, le=5000, description="maximum number of videos to return"),
 ):
-    """List unique videos from the hearing_videos table.
+    """List unique videos that have at least one explicit mention.
 
-    Returns distinct video_id with their video_url and video_name. Default limit is 100.
+    Returns distinct video_id with their video_url, video_name, and mention_count.
     """
     client = bigquery.Client(project=GCP_PROJECT_ID)
     table = f"{GCP_PROJECT_ID}.{BQ_DATASET}.hearing_videos"
@@ -661,16 +661,17 @@ def list_videos(
         SELECT DISTINCT video_id, video_url, video_name
         FROM `{table}`
         WHERE video_id IS NOT NULL AND video_id != ''
-    )
-    SELECT v.video_id, v.video_url, v.video_name, COALESCE(m.cnt, 0) AS mention_count
-    FROM vids v
-    LEFT JOIN (
+    ),
+    mention_counts AS (
         SELECT video_id, COUNT(1) AS cnt
         FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_MENTIONS_TABLE}`
         WHERE video_id IS NOT NULL AND video_id != ''
         GROUP BY video_id
-    ) m
-    ON v.video_id = m.video_id
+    )
+    SELECT v.video_id, v.video_url, v.video_name, COALESCE(m.cnt, 0) AS mention_count
+    FROM vids v
+    JOIN mention_counts m
+      ON v.video_id = m.video_id
     ORDER BY v.video_name ASC
     LIMIT @limit
     """
@@ -693,6 +694,46 @@ def list_videos(
         })
 
     return {"count": len(out), "results": out}
+
+@app.get("/stats")
+def stats():
+    """Return aggregate counts for videos and videos-with-mentions for UI summary."""
+    client = bigquery.Client(project=GCP_PROJECT_ID)
+    hv_table = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_HEARING_VIDEOS_TABLE}"
+    mn_table = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_MENTIONS_TABLE}"
+
+    sql = f"""
+    WITH all_videos AS (
+      SELECT DISTINCT video_id, created_at
+      FROM `{hv_table}`
+      WHERE video_id IS NOT NULL AND video_id != ''
+    ),
+    videos_with_mentions AS (
+      SELECT DISTINCT video_id
+      FROM `{mn_table}`
+      WHERE video_id IS NOT NULL AND video_id != ''
+    )
+    SELECT
+      (SELECT COUNT(*) FROM all_videos) AS total_videos,
+      (SELECT COUNT(*) FROM videos_with_mentions) AS videos_with_mentions,
+      (SELECT MIN(created_at) FROM all_videos) AS since_date
+    """
+
+    rows = list(client.query(sql).result())
+    if not rows:
+        return {
+            "total_videos": 0,
+            "videos_with_mentions": 0,
+            "since_date": None,
+        }
+
+    r = rows[0]
+    since = getattr(r, "since_date", None)
+    return {
+        "total_videos": int(getattr(r, "total_videos", 0) or 0),
+        "videos_with_mentions": int(getattr(r, "videos_with_mentions", 0) or 0),
+        "since_date": since.isoformat() if since is not None else None,
+    }
 
 
 @app.get("/video/{video_id}")

@@ -96,7 +96,7 @@
                     if (st) st.textContent = '';
 
                     try {
-                        const resp = await fetch(`/list_mentions?limit=100`);
+                        const resp = await fetch(`/list_mentions`);
                         const data = await resp.json();
                         const root = document.getElementById('results');
                         root.innerHTML = '';
@@ -199,7 +199,7 @@
                     document.getElementById('page-content').removeAttribute('aria-hidden');
                 }
 
-                function _showKeywordStatus(msg, type) {
+                function showKeywordStatus(msg, type) {
                     // type: 'loading' | 'success' | 'error' | 'info'
                     const el = document.getElementById('keyword-action-status');
                     if (!el) return;
@@ -220,7 +220,7 @@
                     }
                 }
 
-                function _clearKeywordStatus(afterMs = 3000) {
+                function clearKeywordStatus(afterMs = 3000) {
                     const el = document.getElementById('keyword-action-status');
                     if (!el) return;
                     if (afterMs <= 0) {
@@ -230,7 +230,7 @@
                     setTimeout(() => { el.textContent = ''; }, afterMs);
                 }
 
-                function _setKeywordControlsDisabled(disabled) {
+                function setKeywordControlsDisabled(disabled) {
                     const inp = document.getElementById('keyword-suggest-input');
                     const addBtn = document.getElementById('keyword-add-btn');
                     const delBtn = document.getElementById('keyword-delete-btn');
@@ -248,11 +248,11 @@
                     const kw = inp.value.trim();
                     if (!kw) return;
 
-                    _setKeywordControlsDisabled(true);
+                    setKeywordControlsDisabled(true);
                     const addBtn = document.getElementById('keyword-add-btn');
                     const origAddText = addBtn ? addBtn.innerText : null;
                     if (addBtn) addBtn.innerText = 'Adding...';
-                    _showKeywordStatus('Adding keyword...', 'loading');
+                    showKeywordStatus('Adding keyword...', 'loading');
 
                     try {
                         const resp = await fetch('/keywords', {
@@ -261,8 +261,8 @@
                             body: JSON.stringify({ keyword: kw }),
                         });
                         if (!resp.ok) {
-                            _showKeywordStatus('Failed to add keyword', 'error');
-                            _clearKeywordStatus(5000);
+                            showKeywordStatus('Failed to add keyword', 'error');
+                            clearKeywordStatus(5000);
                             return;
                         }
                         const data = await resp.json();
@@ -282,16 +282,16 @@
                         inp.value = '';
                         inp.focus();
 
-                        _showKeywordStatus(`Added "${kw}"`, 'success');
-                        _clearKeywordStatus(3000);
+                        showKeywordStatus(`Added "${kw}"`, 'success');
+                        clearKeywordStatus(3000);
 
                     } catch (err) {
                         console.error('addKeyword error', err);
-                        _showKeywordStatus('Failed to add keyword', 'error');
-                        _clearKeywordStatus(5000);
+                        showKeywordStatus('Failed to add keyword', 'error');
+                        clearKeywordStatus(5000);
                     } finally {
                         if (addBtn && origAddText) addBtn.innerText = origAddText;
-                        _setKeywordControlsDisabled(false);
+                        setKeywordControlsDisabled(false);
                     }
                 }
 
@@ -303,17 +303,17 @@
 
                     if (!confirm(`Delete keyword "${kw}"?`)) return;
 
-                    _setKeywordControlsDisabled(true);
+                    setKeywordControlsDisabled(true);
                     const delBtn = document.getElementById('keyword-delete-btn');
                     const origDelText = delBtn ? delBtn.innerText : null;
                     if (delBtn) delBtn.innerText = 'Deleting...';
-                    _showKeywordStatus('Deleting keyword...', 'loading');
+                    showKeywordStatus('Deleting keyword...', 'loading');
 
                     try {
                         const resp = await fetch(`/keywords?keyword=${encodeURIComponent(kw)}`, { method: 'DELETE' });
                         if (!resp.ok) {
-                            _showKeywordStatus('Failed to delete keyword', 'error');
-                            _clearKeywordStatus(5000);
+                            showKeywordStatus('Failed to delete keyword', 'error');
+                            clearKeywordStatus(5000);
                             return;
                         }
                         const data = await resp.json();
@@ -327,15 +327,15 @@
                             selectEl.appendChild(opt);
                         }
 
-                        _showKeywordStatus(`Deleted "${kw}"`, 'success');
-                        _clearKeywordStatus(3000);
+                        showKeywordStatus(`Deleted "${kw}"`, 'success');
+                        clearKeywordStatus(3000);
                     } catch (err) {
                         console.error('deleteKeyword error', err);
-                        _showKeywordStatus('Failed to delete keyword', 'error');
-                        _clearKeywordStatus(5000);
+                        showKeywordStatus('Failed to delete keyword', 'error');
+                        clearKeywordStatus(5000);
                     } finally {
                         if (delBtn && origDelText) delBtn.innerText = origDelText;
-                        _setKeywordControlsDisabled(false);
+                        setKeywordControlsDisabled(false);
                     }
                 }
 
@@ -343,6 +343,22 @@
                     const overlay = document.getElementById('settings-modal-overlay');
                     overlay.style.display = 'flex';
                     document.body.classList.add('modal-open');
+
+                    try {
+                        const resp = await fetch(`${NOTIFICATION_SYSTEM_SERVER}/api/notification-settings`);
+                        const data = await resp.json();
+                        if (data && data.ok && data.settings) {
+                            const s = data.settings;
+                            const elSender = document.getElementById('sender');
+                            const elPass = document.getElementById('password');
+                            const elTo = document.getElementById('to-emails');
+                            if (elSender) elSender.value = s.sender || '';
+                            if (elPass) elPass.value = s.password || '';
+                            if (elTo) elTo.value = s.recipients || '';
+                        }
+                    } catch (err) {
+                        console.warn('Could not load notification settings:', err);
+                    }
                 }
 
                 function closeSettingsModal() {
@@ -350,7 +366,47 @@
                     document.body.classList.remove('modal-open');
                 }
 
-                // INIT
+                async function saveSettings(e) {
+                    e.preventDefault();
+
+                    const settings = {
+                        sender: (document.getElementById('sender') || {}).value || '',
+                        password: (document.getElementById('password') || {}).value || '',
+                        recipients: (document.getElementById('to-emails') || {}).value || '',
+                    };
+
+                    const statusEl = document.getElementById('settings-status');
+                    if (statusEl) statusEl.textContent = 'Saving...';
+
+                    try {
+                        const submitBtn = (e.target && e.target.querySelector) ? e.target.querySelector('button[type="submit"]') : null;
+                        if (submitBtn) submitBtn.disabled = true;
+
+                        const resp = await fetch(`${NOTIFICATION_SYSTEM_SERVER}/api/notification-settings`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(settings),
+                        });
+
+                        const data = await resp.json();
+                        if (data && data.ok) {
+                            if (statusEl) statusEl.textContent = '✓ Settings saved successfully!';
+                            setTimeout(() => {
+                                if (statusEl) statusEl.textContent = '';
+                                closeSettingsModal();
+                                if (submitBtn) submitBtn.disabled = false;
+                            }, 1400);
+                        } else {
+                            if (statusEl) statusEl.textContent = '✗ Error: ' + (data && data.error ? data.error : 'Unknown error');
+                            if (submitBtn) submitBtn.disabled = false;
+                        }
+                    } catch (err) {
+                        console.error('Failed to save settings:', err);
+                        if (statusEl) statusEl.textContent = '✗ Failed to save settings';
+                        try { const submitBtn = (e.target && e.target.querySelector) ? e.target.querySelector('button[type="submit"]') : null; if (submitBtn) submitBtn.disabled = false; } catch (ee) {}
+                    }
+                }
+
                 showMentionsTab();
                 loadMentionsDefault();
             </script>
@@ -386,23 +442,35 @@
 
         <!-- Settings Modal -->
         <div id="settings-modal-overlay" class="modal-overlay">
-            <div class="modal">
+            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
                 <div class="modal-header">
-                    <h3>Notification Settings</h3>
+                    <h3 id="settings-title" style="margin:0;">Notification Settings</h3>
                     <button onclick="closeSettingsModal()">Close</button>
                 </div>
-                <div class="modal-body">
-                    <form id="settings-form">
-                        <label>Recipients</label>
-                        <input id="to-emails" type="text" style="width:100%;" />
+                <div class="modal-body" style="max-height: 60vh; overflow-y: auto;">
+                    <form id="settings-form" onsubmit="saveSettings(event)">
+                        <div style="margin-bottom: 12px;">
+                            <label for="to-emails" style="display: block; font-weight: bold; margin-bottom: 4px;">Recipients</label>
+                            <input id="to-emails" type="text" required style="width: 100%; padding: 8px;" placeholder="email1@example.com,email2@example.com" />
+                            <div style="font-size: 0.85em; color: #666; margin-top: 4px;">Note: comma seperated (e.g. email@example.com,email@example.com)</div>
+                        </div>
 
-                        <label>Sender</label>
-                        <input id="sender" type="email" style="width:100%;" />
+                        <div style="margin-bottom: 12px;">
+                            <label for="sender" style="display: block; font-weight: bold; margin-bottom: 4px;">Sender</label>
+                            <input id="sender" type="email" required style="width: 100%; padding: 8px;" placeholder="your-email@example.com" />
+                        </div>
 
-                        <label>Password</label>
-                        <input id="password" type="text" style="width:100%;" />
+                        <div style="margin-bottom: 12px;">
+                            <label for="password" style="display: block; font-weight: bold; margin-bottom: 4px;">Password</label>
+                            <input id="password" type="text" style="width: 100%; padding: 8px;" />
+                            <div style="font-size: 0.85em; color: #666; margin-top: 4px;"><a href="https://docs.google.com/document/d/1f_bRihhR2qFiwA509MvXZVlNbJndsgOzACk-xybwhkE/edit?usp=sharing" target="_blank">How to get App Password</a></div>
+                        </div>
 
-                        <button type="button" onclick="closeSettingsModal()">Close</button>
+                        <div style="margin-top: 16px; display: flex; gap: 8px; align-items: center;">
+                            <button type="submit" style="padding: 10px 20px;">Save</button>
+                            <button type="button" onclick="closeSettingsModal()" style="padding: 10px 20px;">Cancel</button>
+                            <span id="settings-status" style="margin-left: 12px; color: #666;"></span>
+                        </div>
                     </form>
                 </div>
             </div>

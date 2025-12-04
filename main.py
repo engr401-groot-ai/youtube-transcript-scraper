@@ -891,31 +891,40 @@ def get_video_detail(video_id: str):
 
 @app.get("/list_mentions")
 def list_mentions(
-    limit: int = Query(100, ge=1, le=1000, description="maximum number of mentions to return"),
+    limit: Optional[int] = Query(
+        None,
+        ge=1,
+        le=1000,
+        description="maximum number of mentions to return; omit to return all",
+    ),
 ):
     """List recent explicit mentions from the mentions table, newest first.
 
+    If `limit` is omitted (`null`), the endpoint returns all mentions (no SQL LIMIT).
     Returns rows with video_id, segment_index, start_sec, end_sec, text, video_url,
     video_name, keyword, created_at.
     """
     client = bigquery.Client(project=GCP_PROJECT_ID)
     table = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_MENTIONS_TABLE}"
 
-    sql = f"""
+    base_sql = f"""
     SELECT video_id, segment_index, start_sec, end_sec, text, video_url, video_name, keyword, created_at
     FROM `{table}`
     WHERE video_id IS NOT NULL
     ORDER BY created_at DESC
-    LIMIT @limit
     """
 
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("limit", "INT64", limit),
-        ]
-    )
-
-    rows = client.query(sql, job_config=job_config).result()
+    # If no limit provided, run the query without LIMIT to return all rows.
+    if limit is None:
+        rows = client.query(base_sql).result()
+    else:
+        sql = base_sql + "\nLIMIT @limit\n"
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("limit", "INT64", limit),
+            ]
+        )
+        rows = client.query(sql, job_config=job_config).result()
 
     out = []
     for r in rows:

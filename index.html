@@ -199,9 +199,9 @@
                     document.getElementById('page-content').removeAttribute('aria-hidden');
                 }
 
-                function showKeywordStatus(msg, type) {
+                function showActionStatus(elId, msg, type) {
                     // type: 'loading' | 'success' | 'error' | 'info'
-                    const el = document.getElementById('keyword-action-status');
+                    const el = document.getElementById(elId);
                     if (!el) return;
                     el.textContent = msg || '';
                     el.style.opacity = '1';
@@ -220,8 +220,8 @@
                     }
                 }
 
-                function clearKeywordStatus(afterMs = 3000) {
-                    const el = document.getElementById('keyword-action-status');
+                function clearActionStatus(elId, afterMs = 3000) {
+                    const el = document.getElementById(elId);
                     if (!el) return;
                     if (afterMs <= 0) {
                         el.textContent = '';
@@ -229,6 +229,11 @@
                     }
                     setTimeout(() => { el.textContent = ''; }, afterMs);
                 }
+
+                function showKeywordStatus(msg, type) { showActionStatus('keyword-action-status', msg, type); }
+                function clearKeywordStatus(afterMs = 3000) { clearActionStatus('keyword-action-status', afterMs); }
+                function showSettingsStatus(msg, type) { showActionStatus('settings-action-status', msg, type); }
+                function clearSettingsStatus(afterMs = 3000) { clearActionStatus('settings-action-status', afterMs); }
 
                 function setKeywordControlsDisabled(disabled) {
                     const inp = document.getElementById('keyword-suggest-input');
@@ -375,8 +380,7 @@
                         recipients: (document.getElementById('to-emails') || {}).value || '',
                     };
 
-                    const statusEl = document.getElementById('settings-status');
-                    if (statusEl) statusEl.textContent = 'Saving...';
+                    showSettingsStatus('Saving...', 'loading');
 
                     try {
                         const submitBtn = (e.target && e.target.querySelector) ? e.target.querySelector('button[type="submit"]') : null;
@@ -390,19 +394,19 @@
 
                         const data = await resp.json();
                         if (data && data.ok) {
-                            if (statusEl) statusEl.textContent = '✓ Settings saved successfully!';
+                            showSettingsStatus('Settings saved successfully!', 'success');
                             setTimeout(() => {
-                                if (statusEl) statusEl.textContent = '';
+                                clearSettingsStatus(0);
                                 closeSettingsModal();
                                 if (submitBtn) submitBtn.disabled = false;
                             }, 1400);
                         } else {
-                            if (statusEl) statusEl.textContent = '✗ Error: ' + (data && data.error ? data.error : 'Unknown error');
+                            showSettingsStatus('Error: ' + (data && data.error ? data.error : 'Unknown error'), 'error');
                             if (submitBtn) submitBtn.disabled = false;
                         }
                     } catch (err) {
                         console.error('Failed to save settings:', err);
-                        if (statusEl) statusEl.textContent = '✗ Failed to save settings';
+                        showSettingsStatus('Failed to save settings', 'error');
                         try { const submitBtn = (e.target && e.target.querySelector) ? e.target.querySelector('button[type="submit"]') : null; if (submitBtn) submitBtn.disabled = false; } catch (ee) {}
                     }
                 }
@@ -417,8 +421,8 @@
             <div class="modal" role="dialog" aria-modal="true">
                 <div class="modal-header">
                     <div id="keywords-count">0 keywords</div>
-                    <div style="display:flex; align-items:center; gap:12px;">
-                        <div id="keyword-action-status" style="min-width:160px; text-align:right; font-size:0.95em; color:#333;"></div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <div id="keyword-action-status" style="min-width:120px; text-align:right; font-size:0.95em; color:#333;"></div>
                         <button onclick="closeKeywordsModal()">Close</button>
                     </div>
                 </div>
@@ -445,7 +449,10 @@
             <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
                 <div class="modal-header">
                     <h3 id="settings-title" style="margin:0;">Notification Settings</h3>
-                    <button onclick="closeSettingsModal()">Close</button>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <div id="settings-action-status" style="min-width:120px; text-align:right; font-size:0.95em; color:#333;"></div>
+                        <button onclick="closeSettingsModal()">Close</button>
+                    </div>
                 </div>
                 <div class="modal-body" style="max-height: 60vh; overflow-y: auto;">
                     <form id="settings-form" onsubmit="saveSettings(event)">
@@ -469,7 +476,6 @@
                         <div style="margin-top: 16px; display: flex; gap: 8px; align-items: center;">
                             <button type="submit" style="padding: 10px 20px;">Save</button>
                             <button type="button" onclick="closeSettingsModal()" style="padding: 10px 20px;">Cancel</button>
-                            <span id="settings-status" style="margin-left: 12px; color: #666;"></span>
                         </div>
                     </form>
                 </div>

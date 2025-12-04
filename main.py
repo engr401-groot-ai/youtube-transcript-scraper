@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Set, Optional, Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query
+from fastapi import Body, HTTPException, status
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, Response
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,7 +77,7 @@ def validate_configuration() -> None:
         logger.error(msg)
         raise RuntimeError(msg)
 
-def _load_explicit_keywords_from_sheet(sheet_id: str, value_range: str = "A:A") -> List[str]:
+def load_explicit_keywords_from_sheet(sheet_id: str, value_range: str = "A:A") -> List[str]:
     """Load keywords from a Google Sheet (first column)."""
     if not sheet_id:
         return []
@@ -119,6 +120,81 @@ def _load_explicit_keywords_from_sheet(sheet_id: str, value_range: str = "A:A") 
         logger.warning(f"Could not load explicit keywords from sheet {sheet_id}: {e}")
         return []
 
+def add_keyword_to_sheet(sheet_id: str, value_range: str, keyword: str) -> bool:
+    """Add a single keyword (one cell) to the sheet range.
+
+    Returns True on success, False on failure.
+    """
+    try:
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        service = build("sheets", "v4", credentials=creds)
+
+        body = {"values": [[keyword]]}
+        service.spreadsheets().values().append(
+            spreadsheetId=sheet_id,
+            range=value_range,
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            body=body,
+        ).execute()
+        logger.info(f"Added keyword to sheet {sheet_id}: {keyword}")
+        return True
+
+    except Exception as e:
+        logger.warning(f"Failed to add keyword to sheet {sheet_id}: {e}")
+        return False
+
+
+def delete_keyword_from_sheet(sheet_id: str, value_range: str, keyword: str) -> bool:
+    """Delete the first matching cell for `keyword` in the provided range.
+
+    Returns True on success, False if not found or on error.
+    """
+    try:
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        service = build("sheets", "v4", credentials=creds)
+
+        resp = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=value_range).execute()
+        values = resp.get("values", []) or []
+        resolved_range = resp.get("range", "")
+
+        # Determine if a sheet/tab prefix exists
+        tab = None
+        if "!" in value_range:
+            tab, _ = value_range.split("!", 1)
+
+        # Find first matching row (case-insensitive)
+        for i, row in enumerate(values):
+            cell = str(row[0]).strip() if row else ""
+            if cell and cell.lower() == keyword.lower():
+                # Determine starting row number from resolved_range
+                m = re.search(r"[A-Za-z]+(\d+)", resolved_range)
+                start_row = int(m.group(1)) if m else 1
+                target_row = start_row + i
+
+                cell_a1 = f"A{target_row}"
+                if tab:
+                    target_range = f"{tab}!{cell_a1}"
+                else:
+                    target_range = cell_a1
+
+                service.spreadsheets().values().update(
+                    spreadsheetId=sheet_id,
+                    range=target_range,
+                    valueInputOption="RAW",
+                    body={"values": [[""]]},
+                ).execute()
+
+                logger.info(f"Deleted keyword in sheet {sheet_id} at {target_range}: {keyword}")
+                return True
+
+        logger.info(f"Keyword not found in sheet {sheet_id}: {keyword}")
+        return False
+
+    except Exception as e:
+        logger.warning(f"Failed to delete keyword from sheet {sheet_id}: {e}")
+        return False
+
 # Load explicit keywords from Google Sheets (if configured)
 # If no sheet is configured, `EXPLICIT_KEYWORDS` will be an empty list and
 # explicit mention extraction will be disabled.
@@ -127,7 +203,7 @@ if EXPLICIT_SHEET_ID:
     if EXPLICIT_SHEET_TAB:
         value_range = f"{EXPLICIT_SHEET_TAB}!{EXPLICIT_SHEET_RANGE}"
 
-    EXPLICIT_KEYWORDS = _load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
+    EXPLICIT_KEYWORDS = load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
     if not EXPLICIT_KEYWORDS:
         logger.warning(
             "Explicit keywords sheet configured but returned no keywords; explicit mention extraction disabled."
@@ -397,7 +473,7 @@ class YouTubeTranscriptScraper:
         if EXPLICIT_SHEET_TAB:
             value_range = f"{EXPLICIT_SHEET_TAB}!{EXPLICIT_SHEET_RANGE}"
 
-        keywords = _load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
+        keywords = load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
         if not keywords:
             return []
 
@@ -876,8 +952,70 @@ def keywords():
     if EXPLICIT_SHEET_TAB:
         value_range = f"{EXPLICIT_SHEET_TAB}!{EXPLICIT_SHEET_RANGE}"
 
-    kws = _load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
+    kws = load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
     return {"count": len(kws), "keywords": kws}
+
+@app.post("/keywords")
+def add_keyword(payload: dict = Body(...)):
+    """Add a new explicit keyword to the configured Google Sheet.
+
+    Expects JSON body: {"keyword": "term"}
+    Returns updated keyword list on success.
+    """
+    if not EXPLICIT_SHEET_ID:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EXPLICIT_SHEET_ID not configured")
+
+    kw = (payload.get("keyword") or "").strip()
+    if not kw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="keyword is required")
+
+    value_range = EXPLICIT_SHEET_RANGE
+    if EXPLICIT_SHEET_TAB:
+        value_range = f"{EXPLICIT_SHEET_TAB}!{EXPLICIT_SHEET_RANGE}"
+
+    low = kw.lower()
+    ok = add_keyword_to_sheet(EXPLICIT_SHEET_ID, value_range, low)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="failed to add keyword to sheet")
+
+    # Refresh cached keywords
+    try:
+        global EXPLICIT_KEYWORDS
+        EXPLICIT_KEYWORDS = load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
+    except Exception:
+        pass
+
+    return {"added": low, "count": len(EXPLICIT_KEYWORDS), "keywords": EXPLICIT_KEYWORDS}
+
+@app.delete("/keywords")
+def delete_keyword(keyword: str = Query(..., description="keyword to delete")):
+    """Delete the provided keyword (first matching cell) from the configured sheet.
+
+    Use query param `?keyword=term`.
+    """
+    if not EXPLICIT_SHEET_ID:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EXPLICIT_SHEET_ID not configured")
+
+    kw = (keyword or "").strip()
+    if not kw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="keyword is required")
+
+    value_range = EXPLICIT_SHEET_RANGE
+    if EXPLICIT_SHEET_TAB:
+        value_range = f"{EXPLICIT_SHEET_TAB}!{EXPLICIT_SHEET_RANGE}"
+
+    ok = delete_keyword_from_sheet(EXPLICIT_SHEET_ID, value_range, kw)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="keyword not found or delete failed")
+
+    # Refresh cached keywords
+    try:
+        global EXPLICIT_KEYWORDS
+        EXPLICIT_KEYWORDS = load_explicit_keywords_from_sheet(EXPLICIT_SHEET_ID, value_range)
+    except Exception:
+        pass
+
+    return {"deleted": kw, "count": len(EXPLICIT_KEYWORDS), "keywords": EXPLICIT_KEYWORDS}
 
 # CLI ENTRYPOINT
 def main():

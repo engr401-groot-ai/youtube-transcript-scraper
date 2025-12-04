@@ -18,6 +18,7 @@
             .keywords-row { border: 1px solid #ddd; padding: 12px; white-space: normal; overflow-y: auto; max-height: 44vh; word-break: break-word; }
             .keyword-suggest { display:flex; gap:8px; align-items:center; }
             .keyword-suggest input[type="text"] { flex: 1 1 auto; padding: 8px; }
+            .kw-action { width: 88px; }
         </style>
     </head>
     <body>
@@ -169,8 +170,21 @@
                     fetch('/keywords')
                         .then(r => r.json())
                         .then(data => {
-                            document.getElementById('keywords-list').textContent = data.keywords.join(', ');
+                            const listEl = document.getElementById('keywords-list');
+                            const selectEl = document.getElementById('keywords-delete-select');
+                            listEl.textContent = data.keywords.join(', ');
                             document.getElementById('keywords-count').textContent = `${data.keywords.length} keywords`;
+
+                            // Populate delete dropdown 
+                            if (selectEl) {
+                                selectEl.innerHTML = '<option value="" disabled selected>Select keyword to delete</option>';
+                                for (const kw of data.keywords) {
+                                    const opt = document.createElement('option');
+                                    opt.value = kw;
+                                    opt.textContent = kw;
+                                    selectEl.appendChild(opt);
+                                }
+                            }
                         });
 
                     setTimeout(() => {
@@ -183,6 +197,146 @@
                     document.getElementById('keywords-modal-overlay').style.display = 'none';
                     document.body.classList.remove('modal-open');
                     document.getElementById('page-content').removeAttribute('aria-hidden');
+                }
+
+                function _showKeywordStatus(msg, type) {
+                    // type: 'loading' | 'success' | 'error' | 'info'
+                    const el = document.getElementById('keyword-action-status');
+                    if (!el) return;
+                    el.textContent = msg || '';
+                    el.style.opacity = '1';
+                    switch (type) {
+                        case 'loading':
+                            el.style.color = '#333';
+                            break;
+                        case 'success':
+                            el.style.color = '#0a7';
+                            break;
+                        case 'error':
+                            el.style.color = '#e44';
+                            break;
+                        default:
+                            el.style.color = '#333';
+                    }
+                }
+
+                function _clearKeywordStatus(afterMs = 3000) {
+                    const el = document.getElementById('keyword-action-status');
+                    if (!el) return;
+                    if (afterMs <= 0) {
+                        el.textContent = '';
+                        return;
+                    }
+                    setTimeout(() => { el.textContent = ''; }, afterMs);
+                }
+
+                function _setKeywordControlsDisabled(disabled) {
+                    const inp = document.getElementById('keyword-suggest-input');
+                    const addBtn = document.getElementById('keyword-add-btn');
+                    const delBtn = document.getElementById('keyword-delete-btn');
+                    const selectEl = document.getElementById('keywords-delete-select');
+                    if (inp) inp.disabled = !!disabled;
+                    if (addBtn) addBtn.disabled = !!disabled;
+                    if (delBtn) delBtn.disabled = !!disabled;
+                    if (selectEl) selectEl.disabled = !!disabled;
+                }
+
+                async function addKeyword(e) {
+                    if (e && e.preventDefault) e.preventDefault();
+                    const inp = document.getElementById('keyword-suggest-input');
+                    if (!inp) return;
+                    const kw = inp.value.trim();
+                    if (!kw) return;
+
+                    _setKeywordControlsDisabled(true);
+                    const addBtn = document.getElementById('keyword-add-btn');
+                    const origAddText = addBtn ? addBtn.innerText : null;
+                    if (addBtn) addBtn.innerText = 'Adding...';
+                    _showKeywordStatus('Adding keyword...', 'loading');
+
+                    try {
+                        const resp = await fetch('/keywords', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ keyword: kw }),
+                        });
+                        if (!resp.ok) {
+                            _showKeywordStatus('Failed to add keyword', 'error');
+                            _clearKeywordStatus(5000);
+                            return;
+                        }
+                        const data = await resp.json();
+                        // Update UI
+                        document.getElementById('keywords-list').textContent = data.keywords.join(', ');
+                        document.getElementById('keywords-count').textContent = `${data.keywords.length} keywords`;
+                        const selectEl = document.getElementById('keywords-delete-select');
+                        if (selectEl) {
+                            selectEl.innerHTML = '<option value="" disabled selected>Select keyword to delete</option>';
+                            for (const kw2 of data.keywords) {
+                                const opt = document.createElement('option');
+                                opt.value = kw2;
+                                opt.textContent = kw2;
+                                selectEl.appendChild(opt);
+                            }
+                        }
+                        inp.value = '';
+                        inp.focus();
+
+                        _showKeywordStatus(`Added "${kw}"`, 'success');
+                        _clearKeywordStatus(3000);
+
+                    } catch (err) {
+                        console.error('addKeyword error', err);
+                        _showKeywordStatus('Failed to add keyword', 'error');
+                        _clearKeywordStatus(5000);
+                    } finally {
+                        if (addBtn && origAddText) addBtn.innerText = origAddText;
+                        _setKeywordControlsDisabled(false);
+                    }
+                }
+
+                async function deleteKeyword() {
+                    const selectEl = document.getElementById('keywords-delete-select');
+                    if (!selectEl) return;
+                    const kw = selectEl.value;
+                    if (!kw) return;
+
+                    if (!confirm(`Delete keyword "${kw}"?`)) return;
+
+                    _setKeywordControlsDisabled(true);
+                    const delBtn = document.getElementById('keyword-delete-btn');
+                    const origDelText = delBtn ? delBtn.innerText : null;
+                    if (delBtn) delBtn.innerText = 'Deleting...';
+                    _showKeywordStatus('Deleting keyword...', 'loading');
+
+                    try {
+                        const resp = await fetch(`/keywords?keyword=${encodeURIComponent(kw)}`, { method: 'DELETE' });
+                        if (!resp.ok) {
+                            _showKeywordStatus('Failed to delete keyword', 'error');
+                            _clearKeywordStatus(5000);
+                            return;
+                        }
+                        const data = await resp.json();
+                        document.getElementById('keywords-list').textContent = data.keywords.join(', ');
+                        document.getElementById('keywords-count').textContent = `${data.keywords.length} keywords`;
+                        selectEl.innerHTML = '<option value="" disabled selected>Select keyword to delete</option>';
+                        for (const kw2 of data.keywords) {
+                            const opt = document.createElement('option');
+                            opt.value = kw2;
+                            opt.textContent = kw2;
+                            selectEl.appendChild(opt);
+                        }
+
+                        _showKeywordStatus(`Deleted "${kw}"`, 'success');
+                        _clearKeywordStatus(3000);
+                    } catch (err) {
+                        console.error('deleteKeyword error', err);
+                        _showKeywordStatus('Failed to delete keyword', 'error');
+                        _clearKeywordStatus(5000);
+                    } finally {
+                        if (delBtn && origDelText) delBtn.innerText = origDelText;
+                        _setKeywordControlsDisabled(false);
+                    }
                 }
 
                 async function openSettingsModal() {
@@ -207,14 +361,25 @@
             <div class="modal" role="dialog" aria-modal="true">
                 <div class="modal-header">
                     <div id="keywords-count">0 keywords</div>
-                    <button onclick="closeKeywordsModal()">Close</button>
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <div id="keyword-action-status" style="min-width:160px; text-align:right; font-size:0.95em; color:#333;"></div>
+                        <button onclick="closeKeywordsModal()">Close</button>
+                    </div>
                 </div>
                 <div class="modal-body">
-                    <div class="keywords-row" id="keywords-list">(loading...)</div>
-                    <form class="keyword-suggest" onsubmit="suggestKeyword(event)">
-                        <input id="keyword-suggest-input" type="text" placeholder="Suggest a keyword" />
-                        <button type="submit">Submit</button>
+                    <div class="keywords-row" id="keywords-list">Loading...</div>
+
+                    <form class="keyword-suggest" onsubmit="addKeyword(event)">
+                        <input id="keyword-suggest-input" type="text" placeholder="Type keyword to add" />
+                        <button id="keyword-add-btn" type="submit" class="kw-action">Add</button>
                     </form>
+
+                    <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+                        <select id="keywords-delete-select" style="flex:1 1 auto; padding:8px;">
+                            <option value="" disabled selected>Select keyword to delete</option>
+                        </select>
+                        <button id="keyword-delete-btn" type="button" class="kw-action" onclick="deleteKeyword()">Delete</button>
+                    </div>
                 </div>
             </div>
         </div>

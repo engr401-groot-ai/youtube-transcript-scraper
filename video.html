@@ -47,14 +47,15 @@
             <!-- Transcript and mentions -->
             <div class="right">
                 <div class="right-header">
-                    <button id="trans-tab-btn" class="tab-btn" disabled>Transcript</button>
-                    <button id="mn-tab-btn" class="tab-btn" style="margin-left: 8px;">Mentions</button>
+                    <!-- Mentions is now the default tab -->
+                    <button id="trans-tab-btn" class="tab-btn">Transcript</button>
+                    <button id="mn-tab-btn" class="tab-btn" style="margin-left: 8px;" disabled>Mentions</button>
                 </div>
                 <div class="right-content">
-                    <div id="transcript-pane">
+                    <div id="transcript-pane" style="display:none;">
                         <p style="color: #666">Transcript will appear here</p>
                     </div>
-                    <div id="mentions-pane" style="display: none"></div>
+                    <div id="mentions-pane"></div>
                 </div>
             </div>
         </div>
@@ -280,7 +281,8 @@
             // initialize data load after DOM is ready
             window.addEventListener('DOMContentLoaded', function () {
                 loadVideoData();
-                showSegments();
+                // default to showing Mentions first
+                showMentions();
                 const transBtn = document.getElementById('trans-tab-btn');
                 const mentionsBtn = document.getElementById('mn-tab-btn');
                 if (transBtn) transBtn.addEventListener('click', showSegments);

@@ -18,12 +18,10 @@
             .keywords-row { border: 1px solid #ddd; padding: 12px; white-space: normal; overflow-y: auto; max-height: 44vh; word-break: break-word; }
             .keyword-suggest { display:flex; gap:8px; align-items:center; }
             .keyword-suggest input[type="text"] { flex: 1 1 auto; padding: 8px; }
-            .kw-action { width: 88px; }
         </style>
     </head>
     <body>
         <div id="page-content">
-
             <h2>UH Mentions Search v1.0</h2>
             <p>Search explicit UH mention segments across transcribed hearing videos.</p>
 
@@ -38,7 +36,7 @@
                 <input id="q_shared" placeholder="Search mentions (e.g., board of regents, mauna kea)" style="width:420px;" />
                 <button onclick="doSearch()">Search</button>
                 <button onclick="clearSearch()">Clear</button>
-                <span id="status_mentions" style="margin-left: 12px;"></span>
+                <span id="status_mentions" style="margin-left: 12px; display: inline-block;"></span>
             </div>
 
             <div id="mentions-tab">
@@ -50,98 +48,100 @@
                 const NOTIFICATION_SYSTEM_SERVER = 'https://notification-system-server-655654578945.us-west1.run.app';
 
                 function showMentionsTab() {
-                    document.getElementById('mentions-tab').style.display = '';
-                    document.getElementById('tab-mentions-btn').disabled = true;
-
+                    const tab = document.getElementById('mentions-tab');
+                    if (tab) tab.style.display = '';
+                    const btn = document.getElementById('tab-mentions-btn');
+                    if (btn) btn.disabled = true;
                     const el = document.getElementById('q_shared');
                     if (el) el.placeholder = 'Search mentions (e.g., board of regents, mauna kea)';
-
                     const sm = document.getElementById('status_mentions');
                     if (sm) sm.style.display = '';
-
                     if (allMentions && allMentions.length > 0) {
-                        renderMentions(allMentions);
+                        renderGroupedMentions(allMentions);
                     } else {
                         loadMentionsDefault();
                     }
                 }
 
+                // Group mention rows by video and render one card per hearing
+                function renderGroupedMentions(items) {
+                    const root = document.getElementById('results');
+                    root.innerHTML = '';
+
+                    const grouped = {};
+                    for (const r of items) {
+                        const vid = r.video_id;
+                        if (!vid) continue;
+                        if (!grouped[vid]) {
+                            grouped[vid] = {
+                                video_id: vid,
+                                video_name: r.video_name,
+                                mentions: []
+                            };
+                        }
+                        grouped[vid].mentions.push(r);
+                    }
+
+                    const hearings = Object.values(grouped);
+
+                    for (const h of hearings) {
+                        const div = document.createElement('div');
+                        div.className = 'card';
+
+                        let snippetsHtml = '';
+                        for (const m of h.mentions) {
+                            snippetsHtml += `
+                                <div class="meta">keyword: <code>${m.keyword || ''}</code> • start: ${m.start_sec || ''}s</div>
+                                <div class="text" style="margin-bottom:6px;">${m.text || ''}</div>
+                            `;
+                        }
+
+                        div.innerHTML = `
+                            <div class="meta"><b>${h.video_name || h.video_id}</b></div>
+                            <div class="meta">${h.mentions.length} UH mention${h.mentions.length === 1 ? '' : 's'} in this hearing</div>
+                            <div style="margin-top:6px; margin-bottom:8px;">
+                                ${snippetsHtml}
+                            </div>
+                            <div><a href="/video/${h.video_id}/view" target="_blank">View All Mentions</a></div>
+                        `;
+                        root.appendChild(div);
+                    }
+
+                    const st = document.getElementById('status_mentions');
+                    if (st) st.textContent = ` ${hearings.length} hearings`;
+                }
+
                 async function runMentionSearch() {
                     const q = document.getElementById("q_shared").value.trim();
                     if (!q) return;
-                    document.getElementById("status_mentions").textContent = " searching...";
+                    const st = document.getElementById("status_mentions");
+                    if (st) st.textContent = " searching...";
 
-                    const res = await fetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
+                    const res = await fetch(`/search?q=${encodeURIComponent(q)}&limit=200`);
                     const data = await res.json();
+                    const items = data.results || [];
+                    renderGroupedMentions(items);
 
-                    document.getElementById("status_mentions").textContent = ` ${data.count} results`;
-
-                    const root = document.getElementById("results");
-                    root.innerHTML = "";
-                    for (const r of data.results) {
-                        const div = document.createElement("div");
-                        div.className = "card";
-                        div.innerHTML = `
-                            <div class="meta"><b>${r.video_name || r.video_id}</b></div>
-                            <div class="meta">keyword: <code>${r.keyword}</code> • start: ${r.start_sec}s</div>
-                            <div class="text">${r.text}</div>
-                            <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
-                        `;
-                        root.appendChild(div);
+                    if (st) {
+                        // how many distinct hearings in search results
+                        const vids = new Set(items.map(m => m.video_id));
+                        st.textContent = ` ${vids.size} hearings`;
                     }
                 }
 
                 async function loadMentionsDefault() {
                     const st = document.getElementById('status_mentions');
                     if (st) st.textContent = '';
-
                     try {
-                        const resp = await fetch(`/list_mentions`);
+                        const resp = await fetch(`/list_mentions?limit=500`);
                         const data = await resp.json();
-                        const root = document.getElementById('results');
-                        root.innerHTML = '';
-
                         const items = data.results || [];
                         allMentions = items.slice();
-
-                        for (const r of items) {
-                            const div = document.createElement('div');
-                            div.className = 'card';
-                            div.innerHTML = `
-                                <div class="meta"><b>${r.video_name || r.video_id}</b></div>
-                                <div class="meta">keyword: <code>${r.keyword || ''}</code> • start: ${r.start_sec}s</div>
-                                <div class="text">${r.text || ''}</div>
-                                <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
-                            `;
-                            root.appendChild(div);
-                        }
-
-                        if (st) st.textContent = ` ${items.length} results`;
-
+                        renderGroupedMentions(items);
                     } catch (err) {
                         if (st) st.textContent = ' error loading mentions';
                         console.error('loadMentionsDefault error', err);
                     }
-                }
-
-                function renderMentions(items) {
-                    const root = document.getElementById('results');
-                    root.innerHTML = '';
-
-                    for (const r of items) {
-                        const div = document.createElement('div');
-                        div.className = 'card';
-                        div.innerHTML = `
-                            <div class="meta"><b>${r.video_name || r.video_id}</b></div>
-                            <div class="meta">keyword: <code>${r.keyword || ''}</code> • start: ${r.start_sec}s</div>
-                            <div class="text">${r.text || ''}</div>
-                            <div><a href="/video/${r.video_id}/view?t=${Math.floor(r.start_sec)}" target="_blank">View Video</a></div>
-                        `;
-                        root.appendChild(div);
-                    }
-
-                    const st = document.getElementById('status_mentions');
-                    if (st) st.textContent = ` ${items.length} results`;
                 }
 
                 function doSearch() {
@@ -151,236 +151,158 @@
                 function clearSearch() {
                     const el = document.getElementById('q_shared');
                     if (el) el.value = '';
-
                     if (allMentions && allMentions.length > 0) {
-                        renderMentions(allMentions);
+                        renderGroupedMentions(allMentions);
+                        const st = document.getElementById('status_mentions');
+                        if (st) {
+                            const vids = new Set(allMentions.map(m => m.video_id));
+                            st.textContent = ` ${vids.size} hearings`;
+                        }
                     } else {
                         loadMentionsDefault();
                     }
                 }
 
-                async function openKeywordsModal() {
+                // --- Keywords modal / focus trap / settings ---
+
+                function openKeywordsModal() {
                     const overlay = document.getElementById('keywords-modal-overlay');
                     if (!overlay) return;
                     overlay.style.display = 'flex';
-
                     try { document.body.classList.add('modal-open'); } catch (e) {}
-                    try { document.getElementById('page-content').setAttribute('aria-hidden', 'true'); } catch (e) {}
+                    try { const page = document.getElementById('page-content'); if (page) page.setAttribute('aria-hidden', 'true'); } catch (e) {}
 
                     fetch('/keywords')
                         .then(r => r.json())
                         .then(data => {
-                            const listEl = document.getElementById('keywords-list');
-                            const selectEl = document.getElementById('keywords-delete-select');
-                            listEl.textContent = data.keywords.join(', ');
-                            document.getElementById('keywords-count').textContent = `${data.keywords.length} keywords`;
-
-                            // Populate delete dropdown 
-                            if (selectEl) {
-                                selectEl.innerHTML = '<option value="" disabled selected>Select keyword to delete</option>';
-                                for (const kw of data.keywords) {
-                                    const opt = document.createElement('option');
-                                    opt.value = kw;
-                                    opt.textContent = kw;
-                                    selectEl.appendChild(opt);
-                                }
-                            }
+                            const list = (data && data.keywords) ? data.keywords : [];
+                            const el = document.getElementById('keywords-list');
+                            if (el) el.textContent = list.join(', ');
+                            const countEl = document.getElementById('keywords-count');
+                            if (countEl) countEl.textContent = `${list.length} keywords`;
+                            trapFocus(document.querySelector('#keywords-modal-overlay .modal'));
+                        })
+                        .catch(err => {
+                            console.error('Could not load keywords', err);
+                            const el = document.getElementById('keywords-list'); if (el) el.textContent = 'Error loading keywords';
+                            const countEl = document.getElementById('keywords-count'); if (countEl) countEl.textContent = '0 keywords';
                         });
 
-                    setTimeout(() => {
-                        const inp = document.getElementById('keyword-suggest-input');
-                        if (inp) inp.focus();
-                    }, 120);
+                    try { setTimeout(() => { const inp = document.getElementById('keyword-suggest-input'); if (inp) inp.focus(); }, 120); } catch (e) {}
                 }
 
                 function closeKeywordsModal() {
-                    document.getElementById('keywords-modal-overlay').style.display = 'none';
-                    document.body.classList.remove('modal-open');
-                    document.getElementById('page-content').removeAttribute('aria-hidden');
+                    const overlay = document.getElementById('keywords-modal-overlay');
+                    if (!overlay) return;
+                    overlay.style.display = 'none';
+                    try { document.body.classList.remove('modal-open'); } catch (e) {}
+                    try { const page = document.getElementById('page-content'); if (page) page.removeAttribute('aria-hidden'); } catch (e) {}
+                    releaseFocusTrap();
                 }
 
-                function showActionStatus(elId, msg, type) {
-                    // type: 'loading' | 'success' | 'error' | 'info'
-                    const el = document.getElementById(elId);
-                    if (!el) return;
-                    el.textContent = msg || '';
-                    el.style.opacity = '1';
-                    switch (type) {
-                        case 'loading':
-                            el.style.color = '#333';
-                            break;
-                        case 'success':
-                            el.style.color = '#0a7';
-                            break;
-                        case 'error':
-                            el.style.color = '#e44';
-                            break;
-                        default:
-                            el.style.color = '#333';
-                    }
-                }
-
-                function clearActionStatus(elId, afterMs = 3000) {
-                    const el = document.getElementById(elId);
-                    if (!el) return;
-                    if (afterMs <= 0) {
-                        el.textContent = '';
-                        return;
-                    }
-                    setTimeout(() => { el.textContent = ''; }, afterMs);
-                }
-
-                function showKeywordStatus(msg, type) { showActionStatus('keyword-action-status', msg, type); }
-                function clearKeywordStatus(afterMs = 3000) { clearActionStatus('keyword-action-status', afterMs); }
-                function showSettingsStatus(msg, type) { showActionStatus('settings-action-status', msg, type); }
-                function clearSettingsStatus(afterMs = 3000) { clearActionStatus('settings-action-status', afterMs); }
-
-                function setKeywordControlsDisabled(disabled) {
-                    const inp = document.getElementById('keyword-suggest-input');
-                    const addBtn = document.getElementById('keyword-add-btn');
-                    const delBtn = document.getElementById('keyword-delete-btn');
-                    const selectEl = document.getElementById('keywords-delete-select');
-                    if (inp) inp.disabled = !!disabled;
-                    if (addBtn) addBtn.disabled = !!disabled;
-                    if (delBtn) delBtn.disabled = !!disabled;
-                    if (selectEl) selectEl.disabled = !!disabled;
-                }
-
-                async function addKeyword(e) {
-                    if (e && e.preventDefault) e.preventDefault();
-                    const inp = document.getElementById('keyword-suggest-input');
-                    if (!inp) return;
-                    const kw = inp.value.trim();
-                    if (!kw) return;
-
-                    setKeywordControlsDisabled(true);
-                    const addBtn = document.getElementById('keyword-add-btn');
-                    const origAddText = addBtn ? addBtn.innerText : null;
-                    if (addBtn) addBtn.innerText = 'Adding...';
-                    showKeywordStatus('Adding keyword...', 'loading');
-
+                function suggestKeyword(e) {
                     try {
-                        const resp = await fetch('/keywords', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ keyword: kw }),
-                        });
-                        if (!resp.ok) {
-                            showKeywordStatus('Failed to add keyword', 'error');
-                            clearKeywordStatus(5000);
-                            return;
+                        e.preventDefault();
+                        const val = (document.getElementById('keyword-suggest-input') || {}).value || '';
+                        if (!val || !val.trim()) return;
+                        console.log('Keyword suggestion submitted:', val.trim());
+                        const inp = document.getElementById('keyword-suggest-input'); if (inp) inp.value = '';
+                        const countEl = document.getElementById('keywords-count');
+                        if (countEl) {
+                            const prev = countEl.textContent;
+                            countEl.textContent = 'Thanks — suggestion logged';
+                            setTimeout(() => { countEl.textContent = prev; }, 1400);
                         }
-                        const data = await resp.json();
-                        // Update UI
-                        document.getElementById('keywords-list').textContent = data.keywords.join(', ');
-                        document.getElementById('keywords-count').textContent = `${data.keywords.length} keywords`;
-                        const selectEl = document.getElementById('keywords-delete-select');
-                        if (selectEl) {
-                            selectEl.innerHTML = '<option value="" disabled selected>Select keyword to delete</option>';
-                            for (const kw2 of data.keywords) {
-                                const opt = document.createElement('option');
-                                opt.value = kw2;
-                                opt.textContent = kw2;
-                                selectEl.appendChild(opt);
-                            }
-                        }
-                        inp.value = '';
-                        inp.focus();
-
-                        showKeywordStatus(`Added "${kw}"`, 'success');
-                        clearKeywordStatus(3000);
-
                     } catch (err) {
-                        console.error('addKeyword error', err);
-                        showKeywordStatus('Failed to add keyword', 'error');
-                        clearKeywordStatus(5000);
-                    } finally {
-                        if (addBtn && origAddText) addBtn.innerText = origAddText;
-                        setKeywordControlsDisabled(false);
+                        console.error('suggestKeyword error', err);
                     }
                 }
 
-                async function deleteKeyword() {
-                    const selectEl = document.getElementById('keywords-delete-select');
-                    if (!selectEl) return;
-                    const kw = selectEl.value;
-                    if (!kw) return;
-
-                    if (!confirm(`Delete keyword "${kw}"?`)) return;
-
-                    setKeywordControlsDisabled(true);
-                    const delBtn = document.getElementById('keyword-delete-btn');
-                    const origDelText = delBtn ? delBtn.innerText : null;
-                    if (delBtn) delBtn.innerText = 'Deleting...';
-                    showKeywordStatus('Deleting keyword...', 'loading');
-
+                let _focusTrapHandler = null;
+                function trapFocus(modalEl) {
                     try {
-                        const resp = await fetch(`/keywords?keyword=${encodeURIComponent(kw)}`, { method: 'DELETE' });
-                        if (!resp.ok) {
-                            showKeywordStatus('Failed to delete keyword', 'error');
-                            clearKeywordStatus(5000);
-                            return;
-                        }
-                        const data = await resp.json();
-                        document.getElementById('keywords-list').textContent = data.keywords.join(', ');
-                        document.getElementById('keywords-count').textContent = `${data.keywords.length} keywords`;
-                        selectEl.innerHTML = '<option value="" disabled selected>Select keyword to delete</option>';
-                        for (const kw2 of data.keywords) {
-                            const opt = document.createElement('option');
-                            opt.value = kw2;
-                            opt.textContent = kw2;
-                            selectEl.appendChild(opt);
-                        }
+                        if (!modalEl) return;
+                        const focusable = Array.from(modalEl.querySelectorAll('a,button,input,textarea,select,[tabindex]:not([tabindex="-1"])')).filter(el => !el.hasAttribute('disabled'));
+                        if (!focusable.length) return;
+                        let idx = 0;
+                        focusable[0].focus();
+                        _focusTrapHandler = function (ev) {
+                            if (ev.key !== 'Tab') return;
+                            ev.preventDefault();
+                            if (ev.shiftKey) idx = (idx - 1 + focusable.length) % focusable.length;
+                            else idx = (idx + 1) % focusable.length;
+                            focusable[idx].focus();
+                        };
+                        document.addEventListener('keydown', _focusTrapHandler);
+                    } catch (e) { console.warn('trapFocus error', e); }
+                }
 
-                        showKeywordStatus(`Deleted "${kw}"`, 'success');
-                        clearKeywordStatus(3000);
-                    } catch (err) {
-                        console.error('deleteKeyword error', err);
-                        showKeywordStatus('Failed to delete keyword', 'error');
-                        clearKeywordStatus(5000);
-                    } finally {
-                        if (delBtn && origDelText) delBtn.innerText = origDelText;
-                        setKeywordControlsDisabled(false);
-                    }
+                function releaseFocusTrap() {
+                    try {
+                        if (_focusTrapHandler) {
+                            document.removeEventListener('keydown', _focusTrapHandler);
+                            _focusTrapHandler = null;
+                        }
+                    } catch (e) {}
                 }
 
                 async function openSettingsModal() {
                     const overlay = document.getElementById('settings-modal-overlay');
+                    if (!overlay) return;
                     overlay.style.display = 'flex';
-                    document.body.classList.add('modal-open');
+                    try { document.body.classList.add('modal-open'); } catch (e) {}
+                    try { const page = document.getElementById('page-content'); if (page) page.setAttribute('aria-hidden', 'true'); } catch (e) {}
 
                     try {
                         const resp = await fetch(`${NOTIFICATION_SYSTEM_SERVER}/api/notification-settings`);
                         const data = await resp.json();
-                        if (data && data.ok && data.settings) {
-                            const s = data.settings;
-                            const elSender = document.getElementById('sender');
-                            const elPass = document.getElementById('password');
-                            const elTo = document.getElementById('to-emails');
-                            if (elSender) elSender.value = s.sender || '';
-                            if (elPass) elPass.value = s.password || '';
-                            if (elTo) elTo.value = s.recipients || '';
+                        if (data.ok && data.settings) {
+                            document.getElementById('sender').value = data.settings.sender || '';
+                            document.getElementById('password').value = data.settings.password || '';
+                            document.getElementById('to-emails').value = data.settings.recipients || '';
                         }
                     } catch (err) {
-                        console.warn('Could not load notification settings:', err);
+                        console.error('Failed to load settings:', err);
+                        alert('Failed to load current settings');
                     }
+
+                    trapFocus(document.querySelector('#settings-modal-overlay .modal'));
                 }
 
                 function closeSettingsModal() {
-                    document.getElementById('settings-modal-overlay').style.display = 'none';
-                    document.body.classList.remove('modal-open');
+                    const overlay = document.getElementById('settings-modal-overlay');
+                    if (!overlay) return;
+                    overlay.style.display = 'none';
+                    try { document.body.classList.remove('modal-open'); } catch (e) {}
+                    try { const page = document.getElementById('page-content'); if (page) page.removeAttribute('aria-hidden'); } catch (e) {}
+                    releaseFocusTrap();
                 }
 
                 async function saveSettings(e) {
                     e.preventDefault();
 
                     const settings = {
-                        sender: (document.getElementById('sender') || {}).value || '',
-                        password: (document.getElementById('password') || {}).value || '',
-                        recipients: (document.getElementById('to-emails') || {}).value || '',
+                        sender: document.getElementById('sender').value.trim(),
+                        password: document.getElementById('password').value.trim(),
+                        recipients: document.getElementById('to-emails').value.trim(),
                     };
 
-                    showSettingsStatus('Saving...', 'loading');
+                    const statusEl = document.getElementById('settings-status');
+
+                    if (settings.recipients.includes(' ')) {
+                        if (statusEl) statusEl.textContent = '✗ Error: Recipients must be comma-separated with NO spaces.';
+                        return;
+                    }
+                    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.sender)) {
+                        if (statusEl) statusEl.textContent = '✗ Error: Sender must be a valid email address (e.g. user@example.com).';
+                        return;
+                    }
+                    if (/\s/.test(settings.password)) {
+                        if (statusEl) statusEl.textContent = '✗ Error: App Password must not contain whitespaces.';
+                        return;
+                    }
+
+                    if (statusEl) statusEl.textContent = 'Saving...';
 
                     try {
                         const submitBtn = (e.target && e.target.querySelector) ? e.target.querySelector('button[type="submit"]') : null;
@@ -389,77 +311,64 @@
                         const resp = await fetch(`${NOTIFICATION_SYSTEM_SERVER}/api/notification-settings`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(settings),
+                            body: JSON.stringify(settings)
                         });
 
                         const data = await resp.json();
-                        if (data && data.ok) {
-                            showSettingsStatus('Settings saved successfully!', 'success');
+                        if (data.ok) {
+                            if (statusEl) statusEl.textContent = '✓ Settings saved successfully!';
                             setTimeout(() => {
-                                clearSettingsStatus(0);
+                                if (statusEl) statusEl.textContent = '';
                                 closeSettingsModal();
                                 if (submitBtn) submitBtn.disabled = false;
-                            }, 1400);
+                            }, 1500);
                         } else {
-                            showSettingsStatus('Error: ' + (data && data.error ? data.error : 'Unknown error'), 'error');
+                            if (statusEl) statusEl.textContent = '✗ Error: ' + (data.error || 'Unknown error');
                             if (submitBtn) submitBtn.disabled = false;
                         }
                     } catch (err) {
                         console.error('Failed to save settings:', err);
-                        showSettingsStatus('Failed to save settings', 'error');
+                        if (statusEl) statusEl.textContent = '✗ Failed to save settings';
                         try { const submitBtn = (e.target && e.target.querySelector) ? e.target.querySelector('button[type="submit"]') : null; if (submitBtn) submitBtn.disabled = false; } catch (ee) {}
                     }
                 }
 
+                // initialize
                 showMentionsTab();
                 loadMentionsDefault();
             </script>
-        </div>
+        </div> <!-- /#page-content -->
 
-        <!-- Keywords Modal -->
+        <!-- Keywords modal overlay -->
         <div id="keywords-modal-overlay" class="modal-overlay">
-            <div class="modal" role="dialog" aria-modal="true">
+            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="keywords-title">
                 <div class="modal-header">
                     <div id="keywords-count">0 keywords</div>
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <div id="keyword-action-status" style="min-width:120px; text-align:right; font-size:0.95em; color:#333;"></div>
-                        <button onclick="closeKeywordsModal()">Close</button>
-                    </div>
+                    <div><button onclick="closeKeywordsModal()">Close</button></div>
                 </div>
                 <div class="modal-body">
-                    <div class="keywords-row" id="keywords-list">Loading...</div>
-
-                    <form class="keyword-suggest" onsubmit="addKeyword(event)">
-                        <input id="keyword-suggest-input" type="text" placeholder="Type keyword to add" />
-                        <button id="keyword-add-btn" type="submit" class="kw-action">Add</button>
+                    <div class="keywords-row" id="keywords-list">(loading...)</div>
+                    <form id="keyword-suggest-form" class="keyword-suggest" onsubmit="suggestKeyword(event)">
+                        <input id="keyword-suggest-input" type="text" placeholder="Suggest a keyword" aria-label="Suggest a keyword" />
+                        <button type="submit">Submit</button>
                     </form>
-
-                    <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
-                        <select id="keywords-delete-select" style="flex:1 1 auto; padding:8px;">
-                            <option value="" disabled selected>Select keyword to delete</option>
-                        </select>
-                        <button id="keyword-delete-btn" type="button" class="kw-action" onclick="deleteKeyword()">Delete</button>
-                    </div>
                 </div>
             </div>
         </div>
 
-        <!-- Settings Modal -->
+        <!-- Settings modal overlay -->
         <div id="settings-modal-overlay" class="modal-overlay">
             <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
                 <div class="modal-header">
                     <h3 id="settings-title" style="margin:0;">Notification Settings</h3>
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <div id="settings-action-status" style="min-width:120px; text-align:right; font-size:0.95em; color:#333;"></div>
-                        <button onclick="closeSettingsModal()">Close</button>
-                    </div>
+                    <button onclick="closeSettingsModal()">Close</button>
                 </div>
                 <div class="modal-body" style="max-height: 60vh; overflow-y: auto;">
                     <form id="settings-form" onsubmit="saveSettings(event)">
                         <div style="margin-bottom: 12px;">
                             <label for="to-emails" style="display: block; font-weight: bold; margin-bottom: 4px;">Recipients</label>
                             <input id="to-emails" type="text" required style="width: 100%; padding: 8px;" placeholder="email1@example.com,email2@example.com" />
-                            <div style="font-size: 0.85em; color: #666; margin-top: 4px;">Note: comma seperated (e.g. email@example.com,email@example.com)</div>
+                            <div style="font-size: 0.85em; color: #666; margin-top: 4px;">Note: comma separated (e.g. email@example.com,email@example.com)</div>
                         </div>
 
                         <div style="margin-bottom: 12px;">
@@ -470,12 +379,12 @@
                         <div style="margin-bottom: 12px;">
                             <label for="password" style="display: block; font-weight: bold; margin-bottom: 4px;">Password</label>
                             <input id="password" type="text" style="width: 100%; padding: 8px;" />
-                            <div style="font-size: 0.85em; color: #666; margin-top: 4px;"><a href="https://docs.google.com/document/d/1f_bRihhR2qFiwA509MvXZVlNbJndsgOzACk-xybwhkE/edit?usp=sharing" target="_blank">How to get App Password</a></div>
                         </div>
 
                         <div style="margin-top: 16px; display: flex; gap: 8px; align-items: center;">
                             <button type="submit" style="padding: 10px 20px;">Save</button>
                             <button type="button" onclick="closeSettingsModal()" style="padding: 10px 20px;">Cancel</button>
+                            <span id="settings-status" style="margin-left: 12px; color: #666;"></span>
                         </div>
                     </form>
                 </div>
